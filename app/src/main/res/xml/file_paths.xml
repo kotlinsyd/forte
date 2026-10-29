@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Shares exactly one thing: the downloaded update APK, for the
+     system installer (see UpdateInstaller). -->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>

@@ -8,6 +8,16 @@ Forte is a music app for Android. It plays songs, albums and playlists from YouT
 
 **[Download the latest release](../../releases/latest)** — Android 8.0 or newer.
 
+## Screenshots
+
+<p align="center">
+  <img src="assets/screenshots/01-home.jpg" width="170" alt="Home">
+  <img src="assets/screenshots/02-library.jpg" width="170" alt="Library">
+  <img src="assets/screenshots/03-explore.jpg" width="170" alt="Explore">
+  <img src="assets/screenshots/04-search.jpg" width="170" alt="Search">
+  <img src="assets/screenshots/05-settings.jpg" width="170" alt="Settings">
+</p>
+
 ## What it does
 
 - Home with Listen again, quick picks, charts and new releases — shelves keep loading as you scroll

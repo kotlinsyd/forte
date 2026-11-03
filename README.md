@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/forte-wordmark.png" alt="Forte" width="440">
+</p>
+
 # Forte
 
 Forte is a music app for Android. It plays songs, albums and playlists from YouTube Music in a clean, dark player — no ads in the way, and your library stays on your phone.

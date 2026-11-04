@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Forte — Music, kept simple</title>
+<meta name="description" content="Forte is a music app for Android. Songs, albums and playlists in a clean, dark player — no ads in the way, and your library stays on your phone.">
+<meta property="og:title" content="Forte">
+<meta property="og:description" content="A music app for Android. Clean, dark, and yours — your library stays on your phone.">
+<meta property="og:image" content="https://kotlinsyd.github.io/forte/assets/forte-wordmark.png">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/png" href="assets/forte-wordmark.png">
+<style>
+  :root{
+    --bg:#0A0A0E;
+    --surface:#141419;
+    --surface2:#1B1B22;
+    --accent:#E5484D;
+    --accent-dark:#C93338;
+    --text:#FFFFFF;
+    --muted:#A7A7B3;
+    --border:rgba(255,255,255,.08);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1060px;margin:0 auto;padding:0 22px}
+
+  /* Hero */
+  .hero{
+    text-align:center;
+    padding:84px 0 30px;
+    background:
+      radial-gradient(620px 340px at 50% -60px, rgba(229,72,77,.20), transparent 70%);
+  }
+  .wordmark{width:min(400px,78vw);height:auto}
+  .tagline{
+    margin:26px auto 0;max-width:620px;
+    font-size:1.14rem;color:var(--muted);
+  }
+  .tagline strong{color:var(--text);font-weight:600}
+  .cta{margin-top:36px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .btn{
+    display:inline-block;padding:14px 30px;border-radius:999px;
+    font-size:1rem;font-weight:600;text-decoration:none;transition:.18s;
+  }
+  .btn-primary{background:var(--accent);color:#fff;box-shadow:0 8px 28px rgba(229,72,77,.35)}
+  .btn-primary:hover{background:var(--accent-dark);transform:translateY(-1px)}
+  .btn-ghost{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+  .btn-ghost:hover{background:var(--surface2)}
+  .fineprint{margin-top:18px;font-size:.88rem;color:var(--muted)}
+  .fineprint .dot{color:var(--accent);padding:0 6px}
+
+  /* Screenshots */
+  .shots{padding:44px 0 8px}
+  .shots-row{
+    display:flex;gap:18px;overflow-x:auto;padding:6px 4px 18px;
+    scrollbar-width:thin;scrollbar-color:var(--surface2) transparent;
+  }
+  .shots-row::-webkit-scrollbar{height:6px}
+  .shots-row::-webkit-scrollbar-thumb{background:var(--surface2);border-radius:3px}
+  .shot{
+    flex:0 0 auto;width:218px;border-radius:26px;overflow:hidden;
+    border:1px solid var(--border);background:var(--surface);
+  }
+  .shot img{display:block;width:100%;height:auto}
+  .shot figcaption{
+    padding:10px 14px;font-size:.86rem;color:var(--muted);text-align:center;
+    border-top:1px solid var(--border);
+  }
+
+  /* Features */
+  .features{padding:52px 0 10px}
+  .features h2,.download h2{
+    text-align:center;font-size:1.65rem;font-weight:700;letter-spacing:-.01em;
+  }
+  .features .sub,.download .sub{
+    text-align:center;color:var(--muted);margin-top:8px;font-size:1rem;
+  }
+  .grid{
+    margin-top:34px;display:grid;gap:16px;
+    grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+  }
+  .card{
+    background:var(--surface);border:1px solid var(--border);
+    border-radius:18px;padding:22px 22px 20px;
+  }
+  .card h3{font-size:1.02rem;font-weight:600;margin-bottom:6px}
+  .card h3::before{
+    content:"";display:inline-block;width:8px;height:8px;border-radius:50%;
+    background:var(--accent);margin-right:10px;vertical-align:2px;
+  }
+  .card p{color:var(--muted);font-size:.95rem}
+
+  /* Download */
+  .download{padding:58px 0 70px;text-align:center}
+  .download .cta{margin-top:28px}
+
+  footer{
+    border-top:1px solid var(--border);
+    padding:26px 0 34px;text-align:center;color:var(--muted);font-size:.92rem;
+  }
+  footer a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--border)}
+  footer a:hover{color:var(--text)}
+  footer .made{color:var(--text);font-weight:600}
+
+  @media (max-width:560px){
+    .hero{padding-top:60px}
+    .shot{width:184px}
+  }
+</style>
+</head>
+<body>
+
+  <header class="hero">
+    <div class="wrap">
+      <img class="wordmark" src="assets/forte-wordmark.png" alt="Forte">
+      <p class="tagline"><strong>Music, kept simple.</strong><br>
+      Forte plays songs, albums and playlists from YouTube Music in a clean, dark player — no ads in the way, and your library stays on your phone.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/kotlinsyd/forte/releases/download/v1.0.16/Forte-v1.0.16.apk">Download Forte</a>
+        <a class="btn btn-ghost" href="https://github.com/kotlinsyd/forte">View on GitHub</a>
+      </div>
+      <p class="fineprint">Version 1.0.16<span class="dot">·</span>Android 8.0 or newer<span class="dot">·</span>Free</p>
+    </div>
+  </header>
+
+  <section class="shots">
+    <div class="wrap">
+      <div class="shots-row">
+        <figure class="shot"><img src="assets/01-home.jpg" alt="Forte Home"><figcaption>Home</figcaption></figure>
+        <figure class="shot"><img src="assets/02-library.jpg" alt="Forte Library"><figcaption>Library</figcaption></figure>
+        <figure class="shot"><img src="assets/03-explore.jpg" alt="Forte Explore"><figcaption>Explore</figcaption></figure>
+        <figure class="shot"><img src="assets/04-search.jpg" alt="Forte Search"><figcaption>Search</figcaption></figure>
+        <figure class="shot"><img src="assets/05-settings.jpg" alt="Forte Settings"><figcaption>Settings</figcaption></figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="wrap">
+      <h2>What Forte does</h2>
+      <p class="sub">Everything a music app should do, nothing in the way.</p>
+      <div class="grid">
+        <div class="card"><h3>A home that knows you</h3><p>Listen again, quick picks, charts and new releases — shelves keep loading as you scroll.</p></div>
+        <div class="card"><h3>Explore</h3><p>Moods, moments and genres as picture cards. Pick a feeling and press play.</p></div>
+        <div class="card"><h3>Search everything</h3><p>Songs, albums, playlists and artists, all in one search.</p></div>
+        <div class="card"><h3>Sign in, if you want</h3><p>Optional sign-in brings your likes, playlists, subscriptions and history with you. Or don't — Forte works fully without it.</p></div>
+        <div class="card"><h3>Your library, on your phone</h3><p>Favourites, playlists, history and downloads live on the device, kept apart from the account.</p></div>
+        <div class="card"><h3>Downloads</h3><p>Save songs inside the Library and play them offline, anywhere.</p></div>
+        <div class="card"><h3>Keeps playing</h3><p>Background play keeps going when you leave the app, with notification and lock-screen controls.</p></div>
+        <div class="card"><h3>A full player</h3><p>Lyrics, song credits, radio, a queue, sleep timer, playback speed and an audio output picker.</p></div>
+        <div class="card"><h3>Your region, your language</h3><p>Pick them yourself — they are used across Home, Explore and charts.</p></div>
+        <div class="card"><h3>Updates itself</h3><p>Forte checks for new versions and installs them in place. No store needed.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="download">
+    <div class="wrap">
+      <h2>Get Forte</h2>
+      <p class="sub">Free. No account needed. Your music stays yours.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/kotlinsyd/forte/releases/download/v1.0.16/Forte-v1.0.16.apk">Download the APK</a>
+        <a class="btn btn-ghost" href="https://github.com/kotlinsyd/forte/releases">All releases</a>
+      </div>
+      <p class="fineprint">Android 8.0 or newer</p>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap">
+      <p><span class="made">Made by Kotlinsyd</span></p>
+      <p style="margin-top:6px"><a href="https://github.com/kotlinsyd/forte">GitHub</a> · <a href="https://gitlab.com/KotlinJS5/forte">GitLab</a></p>
+    </div>
+  </footer>
+
+</body>
+</html>

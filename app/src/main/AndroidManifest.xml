@@ -39,7 +39,15 @@
             android:name=".playback.PlayerService"
             android:exported="true"
             android:foregroundServiceType="mediaPlayback">
+            <!-- MEDIA_BUTTON on the service itself is what the
+                 manifest MediaButtonReceiver (androidx.media 1.7.0)
+                 looks up when a headset/car button is pressed —
+                 without it the receiver found no service and threw,
+                 crashing the app (FORTE-3). The receiver restarts
+                 this service with the key event, which
+                 PlayerService.onStartCommand already handles. -->
             <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
                 <action android:name="android.media.session.MediaButtonService" />
             </intent-filter>
         </service>

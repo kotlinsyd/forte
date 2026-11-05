@@ -31,7 +31,12 @@ class MainActivity : ComponentActivity() {
                 android.graphics.Color.TRANSPARENT,
             ),
         )
-        window.isNavigationBarContrastEnforced = false
+        // API 29+ only: this property does not exist before
+        // Android 10, and touching it on Android 8/9 crashed the
+        // app at launch (FORTE-4).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=

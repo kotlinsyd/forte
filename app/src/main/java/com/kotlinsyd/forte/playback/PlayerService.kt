@@ -37,6 +37,9 @@ class PlayerService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var artworkFor: String? = null
     private var artwork: Bitmap? = null
+    /** True once startForeground() has landed for the current foreground
+     * stint; reset whenever update() drops back out of foreground. */
+    private var foreground = false
     /** Last widget state pushed — playback state flows every 500 ms,
      * and the widget must not be rebuilt at that rate. */
     private var widgetKey: String? = null
@@ -49,6 +52,15 @@ class PlayerService : Service() {
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Playback", NotificationManager.IMPORTANCE_LOW)
         )
+        // FORTE-2 fix: start() reaches us via startForegroundService,
+        // which gives the service ~5 s to call startForeground() or
+        // Android kills the app (RemoteServiceException). The rich
+        // notification in update() can only be built after the track's
+        // artwork has been fetched over the network — far too late to
+        // be the first foreground call. Go foreground NOW with a
+        // minimal notification; update() swaps in the rich one (same
+        // NOTIF_ID) as soon as a track is ready.
+        ensureForeground()
         // NB: inside apply{} the name "controller" means the session's
         // MediaControllerCompat, so capture ours under a different name.
         val ctl = controller
@@ -64,6 +76,7 @@ class PlayerService : Service() {
             isActive = true
         }
         controller.onPlaybackStopped = {
+            foreground = false
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
@@ -83,6 +96,12 @@ class PlayerService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A (re)start after update() dropped out of foreground (no
+        // track) re-arms the same 5 s deadline — re-post the minimal
+        // notification synchronously before handling anything else.
+        // While a track's rich notification is up this is a no-op, so
+        // media-button/widget restarts never clobber it.
+        ensureForeground()
         // Media-button intents arrive via the manifest MediaButtonReceiver,
         // which restarts this service with the key event attached.
         if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
@@ -113,6 +132,7 @@ class PlayerService : Service() {
     private suspend fun update(state: PlaybackState) {
         val track = state.current
         if (track == null) {
+            foreground = false
             stopForeground(STOP_FOREGROUND_REMOVE)
             return
         }
@@ -230,6 +250,32 @@ class PlayerService : Service() {
                 .build()
         }
         startForeground(NOTIF_ID, notification)
+        foreground = true
+    }
+
+    /**
+     * Post the minimal foreground notification if we are not already
+     * foreground. Synchronous and network-free, so it always lands
+     * inside startForegroundService's deadline.
+     */
+    private fun ensureForeground() {
+        if (foreground) return
+        val contentIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        startForeground(
+            NOTIF_ID,
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(getString(R.string.app_name))
+                .setContentText("Preparing playback")
+                .setContentIntent(contentIntent)
+                .setOngoing(true)
+                .build()
+        )
+        foreground = true
     }
 
     companion object {

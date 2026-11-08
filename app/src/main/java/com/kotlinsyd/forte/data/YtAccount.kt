@@ -110,7 +110,15 @@ object YtAccount {
     // ------------------------------------------------------------------
 
     private fun cookiesFor(url: String): Map<String, String> {
-        val raw = CookieManager.getInstance().getCookie(url) ?: return emptyMap()
+        // FORTE-A fix (v1.0.18): on devices whose WebView stack
+        // cannot serve CookieManager at all (a Wear OS watch did
+        // exactly this), getInstance()/getCookie() throw
+        // UnsupportedOperationException. This runs on the startup
+        // path — ForteApp.refreshYtLiked() → isSignedIn() — outside
+        // any runCatching, so the throw was a fatal launch crash.
+        // A jar we cannot read is simply an anonymous session.
+        val raw = runCatching { CookieManager.getInstance().getCookie(url) }
+            .getOrNull() ?: return emptyMap()
         return raw.split(";").mapNotNull { part ->
             val kv = part.trim().split("=", limit = 2)
             if (kv.size == 2) kv[0] to kv[1] else null

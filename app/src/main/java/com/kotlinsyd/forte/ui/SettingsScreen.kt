@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Coffee
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DataUsage
@@ -32,6 +33,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
@@ -609,6 +611,38 @@ fun SettingsScreen(
             onClick = { showLicenses = true },
         )
     }
+    // Community & support (owner's order, v1.0.18): both rows open
+    // the project's own pages in the browser.
+    val discordRow: @Composable () -> Unit = {
+        SettingsRow(
+            icon = Icons.Filled.Forum,
+            title = "Discord",
+            subtitle = "Join the Forte community",
+            value = null,
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://discord.gg/cwzHH3r9pa")),
+                    )
+                }
+            },
+        )
+    }
+    val kofiRow: @Composable () -> Unit = {
+        SettingsRow(
+            icon = Icons.Filled.Coffee,
+            title = "Ko-fi",
+            subtitle = "Support Forte on Ko-fi",
+            value = null,
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://ko-fi.com/sydkotlin")),
+                    )
+                }
+            },
+        )
+    }
 
     // keyword index for the search box (flattened search)
     val entries: List<Pair<String, @Composable () -> Unit>> = listOf(
@@ -643,6 +677,8 @@ fun SettingsScreen(
         "crash reports bugs anonymous" to crashRow,
         "check updates version new" to updatesRow,
         "licenses open source built with" to licensesRow,
+        "discord community chat join" to discordRow,
+        "ko-fi kofi support donate tip" to kofiRow,
     )
     val searching = query.isNotBlank()
     val matches = if (searching) {
@@ -833,6 +869,8 @@ fun SettingsScreen(
                             },
                         ),
                     )
+                    SettingsSection("COMMUNITY")
+                    SettingsGroup(listOf(discordRow, kofiRow))
                 }
             }
 
@@ -1075,7 +1113,7 @@ private fun SettingsGroup(rows: List<@Composable () -> Unit>) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(24.dp))
             .background(ForteColors.Surface)
             .padding(vertical = 4.dp),
     ) {

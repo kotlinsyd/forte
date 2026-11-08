@@ -1,9 +1,12 @@
 package com.kotlinsyd.forte.ui
 
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,10 +58,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -255,26 +261,109 @@ fun Artwork(
 // material layered over it, nothing more.
 // ----------------------------------------------------------------------
 
-/** Cut-glass rim: bright top-left edge, defined bottom edge. */
+/**
+ * Cut-glass rim: bright top-left edge, defined bottom edge.
+ * v1.0.20-test: the stops are Plavio's LiquidRimBrush exactly
+ * (white 0.50 / 0.14 / 0.05 / 0.26) — the capsule rebuild follows
+ * Plavio's construction; Forte's were 0.42 / 0.12 / 0.05 / 0.24.
+ */
 private val DarkGlassRim: Brush = Brush.linearGradient(
     colors = listOf(
-        Color.White.copy(alpha = 0.42f),
-        Color.White.copy(alpha = 0.12f),
+        Color.White.copy(alpha = 0.50f),
+        Color.White.copy(alpha = 0.14f),
         Color.White.copy(alpha = 0.05f),
-        Color.White.copy(alpha = 0.24f),
+        Color.White.copy(alpha = 0.26f),
     ),
 )
 
-/** Soft highlight across the top of a dark-glass surface. */
+/**
+ * Soft highlight across the top of a dark-glass surface.
+ * v1.0.20-test: Plavio's topSheen values — white 0.09 fading over
+ * the top 35% (Forte's were 0.07 over 40%).
+ */
 private fun Modifier.darkGlassSheen(): Modifier = drawWithCache {
-    val endY = (size.height * 0.4f).takeIf { it > 0f } ?: 1f
+    val endY = (size.height * 0.35f).takeIf { it > 0f } ?: 1f
     val brush = Brush.verticalGradient(
-        colors = listOf(Color.White.copy(alpha = 0.07f), Color.Transparent),
+        colors = listOf(Color.White.copy(alpha = 0.09f), Color.Transparent),
         startY = 0f,
         endY = endY,
     )
     onDrawBehind { drawRect(brush) }
 }
+
+// ----------------------------------------------------------------------
+// The capsule glass stack (v1.0.20-test) — Plavio's bottom-pill
+// construction, rebuilt for Forte's capsules and the player's
+// controls on the owner's order ("make the same … just a little
+// more frosted"). Plavio layers, in order: a measured black tint
+// over a real recorded-backdrop blur (22dp BlurEffect), a liquid
+// fill gradient (theme background lifted toward white, 0.29 →
+// 0.37), a white diffusion wash (0.16 → 0.075 → 0.15 at frost
+// 0.12), the top sheen (0.09 / 35%), a soft corner glow (accent
+// 0.06, bottom-right), and the 1dp cut-glass rim. Forte's ONE
+// deviation — the extra frost the owner ordered — is: blur 25dp
+// (vs 22), tint 0.44 live / 0.54 fallback (vs 0.38 / 0.48), wash
+// at frost 0.16 (0.20 → 0.095 → 0.19). Everything else is
+// Plavio's values unchanged. The glow is white here (Plavio's
+// default accent-2 is a light grey; Forte has no accent-2, and
+// red stays out of the capsule per the small-points rule).
+// ----------------------------------------------------------------------
+
+/** The liquid fill: Forte's background lifted toward white, as Plavio's. */
+private fun liquidFillBrush(): Brush = Brush.verticalGradient(
+    listOf(
+        lerp(ForteColors.Bg, Color.White, 0.10f).copy(alpha = 0.29f),
+        lerp(ForteColors.Bg, Color.White, 0.06f).copy(alpha = 0.37f),
+    )
+)
+
+/** The measured dark tint: Forte +frost over Plavio's 0.38 / 0.48. */
+private fun capsuleTint(live: Boolean): Color =
+    Color.Black.copy(alpha = if (live) 0.44f else 0.54f)
+
+/** Diffusion wash at Forte's frost (0.16): Plavio's wash, thickened. */
+private fun Modifier.capsuleWash(): Modifier = drawWithCache {
+    val wash = Brush.verticalGradient(
+        colors = listOf(
+            Color.White.copy(alpha = 0.20f),
+            Color.White.copy(alpha = 0.095f),
+            Color.White.copy(alpha = 0.19f),
+        )
+    )
+    onDrawBehind { drawRect(wash) }
+}
+
+/** Soft corner glow, bottom-right — Plavio's accent glow at 0.06, in white. */
+private fun Modifier.capsuleGlow(): Modifier = drawWithCache {
+    onDrawBehind {
+        if (size.minDimension > 0f) {
+            val glow = Brush.radialGradient(
+                colors = listOf(Color.White.copy(alpha = 0.06f), Color.Transparent),
+                center = Offset(size.width, size.height),
+                radius = size.maxDimension,
+            )
+            drawRect(glow)
+        }
+    }
+}
+
+/**
+ * The full capsule stack over [tint]: tint → liquid fill → wash →
+ * sheen → glow → rim. The blurred backdrop itself (GlassBox /
+ * glassBackdrop) is drawn before this; on the player, which has no
+ * recorded backdrop, the same stack is drawn flat (see
+ * [frostedDarkGlass]).
+ */
+private fun Modifier.capsuleGlassStack(
+    tint: Color,
+    shape: androidx.compose.ui.graphics.Shape,
+): Modifier = this
+    .background(tint, shape)
+    .background(liquidFillBrush(), shape)
+    .capsuleWash()
+    .darkGlassSheen()
+    .capsuleGlow()
+    .border(1.dp, DarkGlassRim, shape)
 
 /**
  * The dark tint gradient for one of the bottom bars. Over a live
@@ -285,18 +374,82 @@ private fun Modifier.darkGlassSheen(): Modifier = drawWithCache {
  * and thick"): the live alphas step up to 0.78 → 0.88 and the
  * dock blur behind them is stronger (see GlassBox blurRadius) —
  * the v1.0.7 tint over a 26px blur read as flat plastic.
+ * v1.0.18 (owner: "20% more thick/dark, true frosted", against
+ * his reference pill): the live tint steps up ~20% again —
+ * 0.78 → 0.94 at the top; the bottom's full +20% would be 1.06,
+ * past the alpha range, so it lands at 0.96 and the frost still
+ * reads through it. The capsules' backdrop blur rises the same
+ * 20% (44px → 53px — see CapsuleDock and MiniPlayer).
  */
 private fun darkGlassBrush(live: Boolean): Brush {
     val top = Color(0xFF17171F)
     val bottom = Color(0xFF0B0B10)
     return Brush.verticalGradient(
         if (live) {
-            listOf(top.copy(alpha = 0.78f), bottom.copy(alpha = 0.88f))
+            listOf(top.copy(alpha = 0.94f), bottom.copy(alpha = 0.96f))
         } else {
             listOf(top.copy(alpha = 0.94f), bottom.copy(alpha = 0.97f))
         },
     )
 }
+
+/**
+ * Polished frosted dark glass for the PLAYER's controls: since
+ * v1.0.20-test this is the FLAT variant of the capsule stack —
+ * the same tint → fill → wash → sheen → glow → rim construction
+ * as the bottom capsules, drawn without a backdrop because the
+ * player page had no recorded backdrop to blur (its background
+ * was the cover's own colour wash). The flat tint is black 0.50
+ * (Plavio's no-blur tint is 0.48; Forte keeps its +frost touch).
+ * The caller clips/clicks; this only paints the glass.
+ * v1.0.21-test: the player page records its poster backdrop
+ * after all, and its controls use [liveCapsuleGlass] below; this
+ * flat variant remains for the mini-player's play disc.
+ */
+fun Modifier.frostedDarkGlass(shape: androidx.compose.ui.graphics.Shape): Modifier =
+    capsuleGlassStack(Color.Black.copy(alpha = 0.50f), shape)
+
+/**
+ * The LIVE variant of the capsule stack (v1.0.21-test): the
+ * recorded [backdrop] drawn through the caller's blur (see
+ * [glassBackdrop]), then [capsuleTint] at the dock's live value,
+ * then the liquid stack — byte-for-byte the Home capsule's
+ * construction (GlassBox with capsule = true). Without a live
+ * backdrop (older Android / no recorded scene) it lands on the
+ * same flat fallback tint the dock uses. The caller clips and
+ * clicks; this only paints the glass.
+ */
+@Composable
+fun Modifier.liveCapsuleGlass(
+    backdrop: BackdropState?,
+    shape: androidx.compose.ui.graphics.Shape,
+    blurRadius: Float,
+): Modifier {
+    val live = backdrop != null && backdropBlurSupported
+    return this
+        .then(if (live) Modifier.glassBackdrop(backdrop, shape, blurRadius) else Modifier)
+        .capsuleGlassStack(capsuleTint(live), shape)
+}
+
+/**
+ * The true-red press ring (v1.0.21-test, owner's rule): while a
+ * glass button is being touched, a solid TRUE-red (#FF0000)
+ * outline ring sits on its edge; on release it is gone. This
+ * REPLACES the v1.0.20-test red pause glyph, which the owner
+ * rejected ("it looks bad") — red now lives on the touch, not
+ * on the resting button. Drawn as a 2.dp border over the glass
+ * rim; transparent whenever the button is not pressed, so the
+ * resting look is untouched. [pressed] comes from the button's
+ * own interaction source (collectIsPressedAsState at the site).
+ */
+fun Modifier.trueRedPressRing(
+    shape: androidx.compose.ui.graphics.Shape,
+    pressed: Boolean,
+): Modifier = border(
+    2.dp,
+    if (pressed) ForteColors.TrueRed else Color.Transparent,
+    shape,
+)
 
 @Composable
 fun GlassBox(
@@ -306,6 +459,11 @@ fun GlassBox(
     backdrop: BackdropState? = null,
     dark: Boolean = false,
     blurRadius: Float = 26f,
+    // v1.0.20-test: the bottom capsule passes true and gets the
+    // Plavio-blueprint capsule stack (and NO shadow — Plavio's
+    // capsule casts none). Other dark surfaces (the account card)
+    // keep the previous near-opaque dark tint untouched.
+    capsule: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     // With a live backdrop the recorded scene shows through blurred;
@@ -319,11 +477,14 @@ fun GlassBox(
             // A weightier presence for the dark dock surfaces: a
             // soft shadow lifts the assembly off the content it
             // floats over (glass v2 — player cards keep no shadow).
-            .then(if (dark && glass) Modifier.shadow(16.dp, shape, clip = false) else Modifier)
+            // The capsule itself casts none (Plavio blueprint).
+            .then(if (dark && glass && !capsule) Modifier.shadow(16.dp, shape, clip = false) else Modifier)
             .clip(shape)
             .then(if (liveGlass) Modifier.glassBackdrop(backdrop, shape, blurRadius) else Modifier)
             .then(
-                if (dark && glass) {
+                if (dark && glass && capsule) {
+                    Modifier.capsuleGlassStack(capsuleTint(liveGlass), shape)
+                } else if (dark && glass) {
                     Modifier
                         .background(darkGlassBrush(liveGlass), shape)
                         .darkGlassSheen()
@@ -339,7 +500,10 @@ fun GlassBox(
                 },
             )
             .then(
-                if (dark && glass) {
+                if (dark && glass && capsule) {
+                    // The rim is the stack's last layer already.
+                    Modifier
+                } else if (dark && glass) {
                     Modifier.border(1.dp, DarkGlassRim, shape)
                 } else {
                     Modifier.border(
@@ -464,7 +628,7 @@ fun ForteActionSheet(
         sheetState = sheetState,
         containerColor = Color(0xFF17171F),
         contentColor = ForteColors.Text,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
         tonalElevation = 0.dp,
         dragHandle = {
             Box(
@@ -727,14 +891,20 @@ fun CapsuleDock(
     backdrop: BackdropState? = null,
 ) {
     val shape = RoundedCornerShape(50)
+    // Plavio blueprint (v1.0.20-test): the capsule is 62dp tall and
+    // its backdrop blur is a 25dp BlurEffect — Plavio's 22dp plus
+    // Forte's ordered extra frost — converted to px like Plavio's.
+    val capsuleBlurPx = with(LocalDensity.current) { 25.dp.toPx() }
     GlassBox(
-        modifier = modifier, shape = shape, glass = glass,
-        backdrop = backdrop, dark = true, blurRadius = 44f,
+        modifier = modifier.height(62.dp), shape = shape, glass = glass,
+        backdrop = backdrop, dark = true, blurRadius = capsuleBlurPx,
+        capsule = true,
     ) {
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 7.dp),
+                .fillMaxSize()
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             DockTabs.forEach { tab ->
@@ -742,10 +912,34 @@ fun CapsuleDock(
                 Box(
                     modifier = Modifier
                         .weight(1f)
+                        .padding(horizontal = 2.dp)
                         .clip(RoundedCornerShape(50))
-                        .background(if (selected) ForteColors.GlassFillHi else Color.Transparent)
+                        .then(
+                            if (selected) {
+                                // Plavio's selected pill: a lighter
+                                // glass oval — white gradient 0.22 →
+                                // 0.13 with a 1dp white 0.16 border.
+                                Modifier
+                                    .background(
+                                        Brush.verticalGradient(
+                                            listOf(
+                                                Color.White.copy(alpha = 0.22f),
+                                                Color.White.copy(alpha = 0.13f),
+                                            )
+                                        ),
+                                        RoundedCornerShape(50),
+                                    )
+                                    .border(
+                                        1.dp,
+                                        Color.White.copy(alpha = 0.16f),
+                                        RoundedCornerShape(50),
+                                    )
+                            } else {
+                                Modifier
+                            },
+                        )
                         .clickable { onSelect(tab.route) }
-                        .padding(vertical = 5.dp),
+                        .padding(horizontal = 3.dp, vertical = 5.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -753,7 +947,7 @@ fun CapsuleDock(
                             tab.icon,
                             contentDescription = tab.label,
                             tint = if (selected) Color.White else ForteColors.TextDim,
-                            modifier = Modifier.size(21.dp),
+                            modifier = Modifier.size(22.dp),
                         )
                         Text(
                             text = tab.label,
@@ -788,24 +982,29 @@ fun MiniPlayer(
         label = "miniTint",
     )
     val liveGlass = glass && backdrop != null && backdropBlurSupported
+    // Plavio blueprint (v1.0.20-test), same as the dock: 25dp
+    // backdrop blur (Plavio's 22 + Forte's extra frost), px-derived.
+    val capsuleBlurPx = with(LocalDensity.current) { 25.dp.toPx() }
     Box(
         modifier = modifier
-            // A weightier presence for the dark dock surfaces: a
-            // soft shadow lifts the assembly off the content it
-            // floats over (glass v2 — player cards keep no shadow).
-            .then(if (glass) Modifier.shadow(16.dp, shape, clip = false) else Modifier)
+            // No shadow: the capsule assembly casts none (Plavio
+            // blueprint; the dock below it is shadowless too).
             .clip(shape)
-            .then(if (liveGlass) Modifier.glassBackdrop(backdrop, shape, 44f) else Modifier)
-            // Frosted dark liquid glass, same material as the capsule
-            // below it (the two bars are one assembly). The song's
-            // colour still breathes over the dark tint — a soft wash,
-            // kept low so the bar always reads dark first.
+            .then(if (liveGlass) Modifier.glassBackdrop(backdrop, shape, capsuleBlurPx) else Modifier)
+            // The capsule glass stack, same construction as the dock
+            // below it (the two bars are one assembly): tint → liquid
+            // fill → wash → sheen → glow → rim. The song's colour
+            // still breathes over the fill — a soft wash, kept low
+            // so the bar always reads dark first.
             .then(
                 if (glass) {
                     Modifier
-                        .background(darkGlassBrush(liveGlass), shape)
+                        .background(capsuleTint(liveGlass), shape)
+                        .background(liquidFillBrush(), shape)
                         .background(tint.copy(alpha = 0.10f), shape)
+                        .capsuleWash()
                         .darkGlassSheen()
+                        .capsuleGlow()
                 } else {
                     Modifier.background(ForteColors.SurfaceHi, shape)
                 },
@@ -845,13 +1044,21 @@ fun MiniPlayer(
                     modifier = Modifier.size(24.dp),
                 )
             }
+            // The mini disc shares the player's glass-button
+            // material (frostedDarkGlass), so it follows the
+            // player's true-red press ring too (v1.0.21-test).
+            val playPressSource = remember { MutableInteractionSource() }
+            val playPressed by playPressSource.collectIsPressedAsState()
             Box(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(ForteColors.GlassFillHi)
-                    .border(1.dp, ForteColors.GlassBorder, CircleShape)
-                    .clickable { onTogglePlay() },
+                    // The flat capsule glass, like the player's
+                    // controls (v1.0.20-test) — one material for
+                    // every glass control in the assembly.
+                    .frostedDarkGlass(CircleShape)
+                    .trueRedPressRing(CircleShape, playPressed)
+                    .clickable(interactionSource = playPressSource, indication = LocalIndication.current) { onTogglePlay() },
                 contentAlignment = Alignment.Center,
             ) {
                 // Buffering honesty (owner's v1.0.7 note): while

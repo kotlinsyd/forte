@@ -398,6 +398,43 @@ class PlayerController(
     }
 
     /**
+     * Thumb-up lean (owner's order, v1.0.18): liking the current
+     * song also leans the listening toward more like it — the
+     * song's own radio relatives are fetched once and the fresh
+     * ones (not already queued, not disliked, deduped by the
+     * radio hygiene rules) are appended to the END of the live
+     * queue, so similar songs keep playing after the current
+     * queue without reordering anything the listener chose. If
+     * the seed has left the queue by the time the fetch lands,
+     * nothing is appended. The like itself is recorded by the
+     * caller (the favorites store, with the YouTube two-way sync).
+     */
+    fun leanIntoSimilar(seed: Track) {
+        scope.launch {
+            val relatives = runCatching { YtAccount.radioStart(seed.id) }
+                .getOrNull()?.tracks?.takeIf { it.isNotEmpty() }
+                ?: runCatching { ForteEngine.related(seed.id) }
+                    .getOrDefault(emptyList())
+            if (relatives.isEmpty()) return@launch
+            val now = state.value
+            if (now.queue.none { it.id == seed.id }) return@launch
+            val disliked = settings.settings.value.dislikedIds
+            val fresh = radioFilter(now.queue, relatives, seed.artist)
+                .filter { it.id != seed.id && it.id !in disliked }
+                .take(8)
+                .map { it.withArtworkFloor() }
+            if (fresh.isEmpty()) return@launch
+            val latest = state.value
+            if (latest.queue.none { it.id == seed.id }) return@launch
+            val known = latest.queue.map { it.id }.toHashSet()
+            val add = fresh.filter { it.id !in known }
+            if (add.isNotEmpty()) {
+                state.value = latest.copy(queue = latest.queue + add)
+            }
+        }
+    }
+
+    /**
      * Radio queue hygiene: dedupe by normalised
      * title+artist — not just video id, so the same song from a
      * different upload can't repeat — and cap how much of one

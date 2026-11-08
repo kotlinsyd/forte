@@ -1,10 +1,15 @@
 package com.kotlinsyd.forte.ui
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -39,6 +44,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.MoreVert
@@ -56,6 +62,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.Speaker
 import androidx.compose.material.icons.filled.ThumbDown
+import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.AlertDialog
@@ -78,7 +85,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -91,6 +102,7 @@ import coil.imageLoader
 import coil.request.ImageRequest
 import coil.request.SuccessResult
 import com.kotlinsyd.forte.ForteApp
+import com.kotlinsyd.forte.data.AudioQuality
 import com.kotlinsyd.forte.data.Lyrics
 import com.kotlinsyd.forte.data.YtAccount
 import com.kotlinsyd.forte.data.formatDuration
@@ -125,6 +137,7 @@ fun PlayerScreen(
     var showCredits by remember { mutableStateOf(false) }
     var showOutput by remember { mutableStateOf(false) }
     var showMoreSheet by remember { mutableStateOf(false) }
+    var showQuality by remember { mutableStateOf(false) }
     var credits by remember(track?.id) {
         mutableStateOf<List<YtAccount.SongCredit>?>(null)
     }
@@ -192,6 +205,10 @@ fun PlayerScreen(
                     }
             }
         }
+        // Thumb down (owner's order, v1.0.18): a NEW dislike also
+        // changes the song at once — the listener has said they
+        // don't want this one. Removing a dislike never skips.
+        if (target) controller.next(manual = true)
     }
     val isDownloaded = downloads.any { it.videoId == track.id }
     val dlProgress = dlStates[track.id]
@@ -201,9 +218,19 @@ fun PlayerScreen(
 
     // Artwork-derived colour: the cover's own
     // dominant colour, darkened into the Onyx background — the sharp
-    // artwork stays the hero, no blurred copy anywhere.
+    // artwork stays the hero. Since v1.0.21-test the same small
+    // decode also feeds the page's blurred poster backdrop (see
+    // posterBitmap below and the backdrop box further down).
     val context = LocalContext.current
     var artColor by remember(track.id) { mutableStateOf(ForteColors.Bg) }
+    // The current song's poster as a bitmap for the blurred
+    // backdrop: a private copy of the palette load's small decode
+    // (the cached original belongs to Coil — the palette block's
+    // own caution applies). Null while loading or when the track
+    // has no artwork; the colour wash is the fallback then.
+    var posterBitmap by remember(track.id) {
+        mutableStateOf<android.graphics.Bitmap?>(null)
+    }
     LaunchedEffect(track.id, heroUrl) {
         val url = heroUrl
         if (!url.isNullOrBlank()) {
@@ -219,6 +246,14 @@ fun PlayerScreen(
                 if (result is SuccessResult) {
                     val bitmap = (result.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
                     if (bitmap != null) {
+                        // Backdrop copy first (v1.0.21-test): the
+                        // poster backdrop draws this private copy,
+                        // never Coil's cached bitmap.
+                        posterBitmap = runCatching {
+                            bitmap.copy(
+                                android.graphics.Bitmap.Config.ARGB_8888, false
+                            )
+                        }.getOrNull()
                         // Palette runs off the main thread, on a private
                         // copy: the cached bitmap belongs to Coil and
                         // must never be read while it can be recycled.
@@ -258,23 +293,98 @@ fun PlayerScreen(
         },
         label = "playerBg",
     )
+    // The player's own recorded backdrop (v1.0.21-test): the page
+    // records its background into this state and the controls'
+    // live glass blurs it behind themselves — the same machinery
+    // the Home stage uses for the dock (ForteRoot), wired for the
+    // player page. Blur values: the glass samples at the dock's
+    // 25dp; the poster's own blur is a much stronger 48dp.
+    val playerBackdrop = rememberBackdropState()
+    val capsuleBlurPx = with(LocalDensity.current) { 25.dp.toPx() }
+    val posterBlurPx = with(LocalDensity.current) { 48.dp.toPx() }
+    val poster = posterBitmap
+    val posterAlpha by animateFloatAsState(
+        targetValue = if (poster != null) 1f else 0f,
+        animationSpec = if (forteSettings.reduceAnimation) {
+            androidx.compose.animation.core.snap()
+        } else {
+            tween(600)
+        },
+        label = "posterBackdrop",
+    )
     Box(Modifier.fillMaxSize()) {
-        // Ambience (v1.0.14): the cover's palette colour washes the
-        // top of the page and deepens into the background colour —
-        // no blurred copy of the cover floating behind itself.
+        // Backdrop (v1.0.21-test, owner's order: "add posters
+        // backdrop to blur"). The current song's poster — decoded
+        // small by the palette load (96×96) — drawn full-bleed
+        // behind everything, strongly blurred. The box is what
+        // the page records into [playerBackdrop]; the controls
+        // above blur it live behind their glass. When the track
+        // has no artwork (or it hasn't landed yet), the v1.0.14
+        // colour wash alone carries the page, exactly as before.
         Box(
             Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            playerBg,
-                            lerp(playerBg, ForteColors.Bg, 0.45f),
-                            ForteColors.Bg,
-                        ),
-                    )
-                ),
-        )
+                .recordBackdrop(playerBackdrop),
+        ) {
+            // Ambience (v1.0.14): the cover's palette colour
+            // washes the top of the page and deepens into the
+            // background colour.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                playerBg,
+                                lerp(playerBg, ForteColors.Bg, 0.45f),
+                                ForteColors.Bg,
+                            ),
+                        )
+                    ),
+            )
+            if (poster != null) {
+                Image(
+                    bitmap = poster.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            alpha = posterAlpha
+                            // Scaled past the edges so the blur's
+                            // falloff never shows a rim.
+                            scaleX = 1.18f
+                            scaleY = 1.18f
+                            if (backdropBlurSupported) {
+                                renderEffect = BlurEffect(
+                                    posterBlurPx, posterBlurPx,
+                                    TileMode.Clamp,
+                                )
+                            }
+                        },
+                )
+            }
+        }
+        // Readability tint over the poster — deliberately NOT
+        // recorded: the controls' glass samples the poster
+        // itself (the way the dock samples the untinted page),
+        // while text and artwork sit on this tint and stay
+        // perfectly readable over bright covers.
+        if (poster != null) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                ForteColors.Bg.copy(alpha = 0.34f),
+                                ForteColors.Bg.copy(alpha = 0.58f),
+                                ForteColors.Bg.copy(alpha = 0.88f),
+                            ),
+                        )
+                    ),
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -416,39 +526,92 @@ fun PlayerScreen(
             // above carries the deck's weight(1f) and absorbs the
             // slack, so the rows below always start right under the
             // stream-info line and end flush at the bottom inset.
+            // Transport row (v1.0.19-test, owner's Sample B pick):
+            // every button is its OWN oval pill — only play/pause
+            // stays a round disc, centred. v1.0.21-test: the
+            // pills' glass is LIVE (the page's recorded poster
+            // backdrop, the dock's construction and blur), and
+            // red survives as the press ring only — a true-red
+            // outline on whichever button is being touched (see
+            // trueRedPressRing); the v1.0.20-test red pause glyph
+            // is gone on the owner's word.
+            val ovalShape = RoundedCornerShape(50)
+            val shufflePress = remember { MutableInteractionSource() }
+            val shufflePressed by shufflePress.collectIsPressedAsState()
+            val previousPress = remember { MutableInteractionSource() }
+            val previousPressed by previousPress.collectIsPressedAsState()
+            val pausePress = remember { MutableInteractionSource() }
+            val pausePressed by pausePress.collectIsPressedAsState()
+            val nextPress = remember { MutableInteractionSource() }
+            val nextPressed by nextPress.collectIsPressedAsState()
+            val repeatPress = remember { MutableInteractionSource() }
+            val repeatPressed by repeatPress.collectIsPressedAsState()
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    IconButton(onClick = { controller.setShuffle(!state.shuffle) }) {
+                    Box(
+                        modifier = Modifier
+                            .width(54.dp)
+                            .height(44.dp)
+                            .clip(ovalShape)
+                            .liveCapsuleGlass(playerBackdrop, ovalShape, capsuleBlurPx)
+                            .trueRedPressRing(ovalShape, shufflePressed)
+                            .clickable(interactionSource = shufflePress, indication = LocalIndication.current) {
+                                controller.setShuffle(!state.shuffle)
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
                         Icon(
                             Icons.Filled.Shuffle, contentDescription = "Shuffle",
                             tint = if (state.shuffle) ForteColors.Red else Color.White.copy(alpha = 0.8f),
+                            modifier = Modifier.size(20.dp),
                         )
                     }
                     if (state.shuffle) {
                         Box(Modifier.size(4.dp).clip(CircleShape).background(ForteColors.Red))
                     }
                 }
-                IconButton(onClick = { controller.previous() }, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Filled.SkipPrevious, contentDescription = "Previous", tint = Color.White, modifier = Modifier.size(36.dp))
+                Box(
+                    modifier = Modifier
+                        .width(60.dp)
+                        .height(48.dp)
+                        .clip(ovalShape)
+                        .liveCapsuleGlass(playerBackdrop, ovalShape, capsuleBlurPx)
+                        .trueRedPressRing(ovalShape, previousPressed)
+                        .clickable(interactionSource = previousPress, indication = LocalIndication.current) { controller.previous() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.SkipPrevious, contentDescription = "Previous", tint = Color.White, modifier = Modifier.size(30.dp))
                 }
-                // Play/pause (v1.0.14): a 64dp glass circle with a
-                // plain white glyph — red survives only as the
-                // buffering ring inside it.
+                // Play/pause (v1.0.14): a 64dp glass circle.
+                // v1.0.18: the glass is the polished frosted dark
+                // material, like every other player control.
+                // v1.0.19-test tried a 12% red wash under the
+                // glass; the owner rejected it ("not true red").
+                // v1.0.20-test replaced the wash with the glyph
+                // itself in solid TRUE red. v1.0.21-test: the
+                // owner rejected that too ("it looks bad") — the
+                // glyph and the buffering ring are WHITE again,
+                // like every other control and the mini-player's
+                // disc, and the glass is the LIVE capsule glass
+                // over the poster backdrop. The disc's only red
+                // now is the press ring while a finger is on it.
                 Box(
                     modifier = Modifier
                         .size(64.dp)
                         .clip(CircleShape)
-                        .background(ForteColors.GlassFill)
-                        .border(1.dp, ForteColors.GlassBorder, CircleShape)
-                        .clickable { controller.togglePlayPause() },
+                        .liveCapsuleGlass(playerBackdrop, CircleShape, capsuleBlurPx)
+                        .trueRedPressRing(CircleShape, pausePressed)
+                        .clickable(interactionSource = pausePress, indication = LocalIndication.current) {
+                            controller.togglePlayPause()
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     if (state.buffering) {
-                        CircularProgressIndicator(color = ForteColors.Red, modifier = Modifier.size(34.dp))
+                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(34.dp))
                     } else {
                         Icon(
                             if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
@@ -457,15 +620,38 @@ fun PlayerScreen(
                         )
                     }
                 }
-                IconButton(onClick = { controller.next(manual = true) }, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Filled.SkipNext, contentDescription = "Next", tint = Color.White, modifier = Modifier.size(36.dp))
+                Box(
+                    modifier = Modifier
+                        .width(60.dp)
+                        .height(48.dp)
+                        .clip(ovalShape)
+                        .liveCapsuleGlass(playerBackdrop, ovalShape, capsuleBlurPx)
+                        .trueRedPressRing(ovalShape, nextPressed)
+                        .clickable(interactionSource = nextPress, indication = LocalIndication.current) {
+                            controller.next(manual = true)
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.SkipNext, contentDescription = "Next", tint = Color.White, modifier = Modifier.size(30.dp))
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    IconButton(onClick = { controller.cycleRepeat() }) {
+                    Box(
+                        modifier = Modifier
+                            .width(54.dp)
+                            .height(44.dp)
+                            .clip(ovalShape)
+                            .liveCapsuleGlass(playerBackdrop, ovalShape, capsuleBlurPx)
+                            .trueRedPressRing(ovalShape, repeatPressed)
+                            .clickable(interactionSource = repeatPress, indication = LocalIndication.current) {
+                                controller.cycleRepeat()
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
                         Icon(
                             if (state.repeat == RepeatMode.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
                             contentDescription = "Repeat",
                             tint = if (state.repeat != RepeatMode.OFF) ForteColors.Red else Color.White.copy(alpha = 0.8f),
+                            modifier = Modifier.size(20.dp),
                         )
                     }
                     if (state.repeat != RepeatMode.OFF) {
@@ -474,36 +660,55 @@ fun PlayerScreen(
                 }
             }
 
-            // One row of glass icon chips (v1.0.14) replaces the
-            // three labelled action tiles: favorite, dislike,
-            // download, queue and the overflow sheet — which now
-            // carries sleep, EQ, speed, share, add-to-playlist,
-            // credits, radio and lyrics. Nothing was dropped; the
-            // secondary actions moved into the sheet.
+            // One row of glass icon chips. v1.0.18 (owner's order):
+            // the row is now queue, THUMB UP, download, THUMB DOWN
+            // and the overflow sheet. Thumb up likes the song (the
+            // same favorites store + YouTube two-way sync the heart
+            // used — the heart itself still lives in the song menu)
+            // and leans the queue toward similar songs; thumb down
+            // dislikes AND changes the song (see toggleDislike).
+            // The sheet carries sleep, EQ, speed, quality, share,
+            // add-to-playlist, credits, radio and lyrics.
+            // v1.0.19-test (Sample B): each chip is its own oval
+            // pill like the transport row; a LIKED thumb up fills
+            // with solid TRUE red (v1.0.20-test) — the row's one
+            // red point — while unliked it stays white on dark glass.
+            // v1.0.21-test: the chips' glass is the LIVE capsule
+            // glass over the poster backdrop, and every chip wears
+            // the true-red press ring while touched.
             Spacer(Modifier.height(16.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                PlayerChip(onClick = { actions.toggleFavorite(track) }) {
+                PlayerChip(
+                    onClick = onOpenQueue,
+                    backdrop = playerBackdrop, glassBlurPx = capsuleBlurPx,
+                ) {
                     Icon(
-                        if (isFavorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                        contentDescription = "Favorite",
-                        tint = if (isFavorite) ForteColors.Red else Color.White,
-                        modifier = Modifier.size(22.dp),
+                        Icons.Filled.QueueMusic, contentDescription = "Queue",
+                        tint = Color.White, modifier = Modifier.size(22.dp),
                     )
                 }
-                PlayerChip(onClick = toggleDislike) {
+                PlayerChip(
+                    onClick = {
+                        if (!isFavorite) actions.toggleFavorite(track)
+                        controller.leanIntoSimilar(track)
+                    },
+                    filledRed = isFavorite,
+                    backdrop = playerBackdrop, glassBlurPx = capsuleBlurPx,
+                ) {
                     Icon(
-                        Icons.Filled.ThumbDown,
-                        contentDescription = if (isDisliked) "Remove dislike" else "Dislike",
-                        tint = if (isDisliked) ForteColors.Red else Color.White,
+                        Icons.Filled.ThumbUp,
+                        contentDescription = "Like — play more like this",
+                        tint = Color.White,
                         modifier = Modifier.size(22.dp),
                     )
                 }
                 PlayerChip(
                     onClick = { if (!isDownloaded && dlProgress == null) actions.download(track) },
+                    backdrop = playerBackdrop, glassBlurPx = capsuleBlurPx,
                 ) {
                     when {
                         dlProgress != null && dlProgress.error == null -> {
@@ -520,13 +725,21 @@ fun PlayerScreen(
                         )
                     }
                 }
-                PlayerChip(onClick = onOpenQueue) {
+                PlayerChip(
+                    onClick = toggleDislike,
+                    backdrop = playerBackdrop, glassBlurPx = capsuleBlurPx,
+                ) {
                     Icon(
-                        Icons.Filled.QueueMusic, contentDescription = "Queue",
-                        tint = Color.White, modifier = Modifier.size(22.dp),
+                        Icons.Filled.ThumbDown,
+                        contentDescription = if (isDisliked) "Remove dislike" else "Dislike — skip this song",
+                        tint = if (isDisliked) ForteColors.TrueRed else Color.White,
+                        modifier = Modifier.size(22.dp),
                     )
                 }
-                PlayerChip(onClick = { showMoreSheet = true }) {
+                PlayerChip(
+                    onClick = { showMoreSheet = true },
+                    backdrop = playerBackdrop, glassBlurPx = capsuleBlurPx,
+                ) {
                     Icon(
                         Icons.Filled.MoreVert, contentDescription = "More",
                         tint = Color.White, modifier = Modifier.size(22.dp),
@@ -537,13 +750,15 @@ fun PlayerScreen(
             // going, centred under the controls; tapping it opens
             // the output sheet.
             Spacer(Modifier.height(14.dp))
+            val outputPress = remember { MutableInteractionSource() }
+            val outputPressed by outputPress.collectIsPressedAsState()
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterHorizontally)
-                    .clip(RoundedCornerShape(50))
-                    .background(ForteColors.GlassFill)
-                    .border(1.dp, ForteColors.GlassBorder, RoundedCornerShape(50))
-                    .clickable { showOutput = true }
+                    .clip(ovalShape)
+                    .liveCapsuleGlass(playerBackdrop, ovalShape, capsuleBlurPx)
+                    .trueRedPressRing(ovalShape, outputPressed)
+                    .clickable(interactionSource = outputPress, indication = LocalIndication.current) { showOutput = true }
                     .padding(horizontal = 14.dp, vertical = 8.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -811,6 +1026,23 @@ fun PlayerScreen(
                 val next = rates[(rates.indexOf(state.speed) + 1) % rates.size]
                 controller.setSpeed(next)
             }
+            // Playback quality's home in the player (owner's order,
+            // v1.0.18): the ⋮ sheet. It sets the same base quality
+            // Settings carries — one setting, one store; the
+            // per-network ceilings in Settings still apply on
+            // Wi-Fi/mobile when set there.
+            ForteSheetRow(
+                Icons.Filled.HighQuality, "Audio quality",
+                trailing = {
+                    Text(
+                        playerQualityLabel(forteSettings.audioQuality),
+                        fontSize = 13.sp, color = ForteColors.TextDim,
+                    )
+                },
+            ) {
+                showMoreSheet = false
+                showQuality = true
+            }
             ForteSheetRow(Icons.Filled.Share, "Share") {
                 showMoreSheet = false
                 actions.share(track)
@@ -839,6 +1071,70 @@ fun PlayerScreen(
     if (showEq) {
         EqualizerDialog(onDismiss = { showEq = false })
     }
+    if (showQuality) {
+        PlayerQualityDialog(
+            current = forteSettings.audioQuality,
+            onPick = { app.settings.setAudioQuality(it) },
+            onDismiss = { showQuality = false },
+        )
+    }
+}
+
+/** Short label for one quality step, matching Settings' wording. */
+private fun playerQualityLabel(q: AudioQuality): String = when (q) {
+    AudioQuality.AUTO -> "Auto"
+    AudioQuality.HIGH -> "High · up to 256k"
+    AudioQuality.MEDIUM -> "Medium · ~96k"
+    AudioQuality.LOW -> "Low · ~50k"
+}
+
+/** The player's quality picker (v1.0.18): the four steps of the
+ * base streaming quality, written to the one Settings store. A
+ * pick applies from the next track the engine resolves — the
+ * playing song is never restarted mid-stream. */
+@Composable
+private fun PlayerQualityDialog(
+    current: AudioQuality,
+    onPick: (AudioQuality) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = ForteColors.SurfaceHi,
+        title = { Text("Audio quality", color = Color.White) },
+        text = {
+            Column {
+                AudioQuality.entries.forEach { q ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onPick(q); onDismiss() }
+                            .padding(vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        androidx.compose.material3.RadioButton(
+                            selected = q == current,
+                            onClick = { onPick(q); onDismiss() },
+                            colors = androidx.compose.material3.RadioButtonDefaults.colors(
+                                selectedColor = ForteColors.Red,
+                                unselectedColor = ForteColors.TextDim,
+                            ),
+                        )
+                        Text(playerQualityLabel(q), color = Color.White, fontSize = 14.sp)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Separate Wi-Fi / mobile choices in Settings still apply on those networks.",
+                    color = ForteColors.TextDim, fontSize = 12.sp,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close", color = ForteColors.TextDim) }
+        },
+    )
 }
 
 @Composable
@@ -919,7 +1215,10 @@ private fun ForteProgressBar(
                 Modifier
                     .fillMaxWidth(fraction)
                     .fillMaxHeight()
-                    .background(ForteColors.Red),
+                    // TRUE red (v1.0.20-test): the played portion is
+                    // one of the owner's small red points — solid
+                    // #FF0000, not the muted shipped Red.
+                    .background(ForteColors.TrueRed),
             )
         }
         if (scrubbing) {
@@ -974,19 +1273,40 @@ private fun ForteProgressBar(
     }
 }
 
-/** One 48dp glass icon chip in the player's action row. */
+/** One chip in the player's action row — an oval pill since
+ * v1.0.19-test (owner's Sample B pick; it was a round disc up to
+ * v1.0.18-test). [filledRed] swaps the glass for a solid TRUE-red
+ * fill (#FF0000 since v1.0.20-test — the shipped Red read muted
+ * to the owner): the liked thumb up is the one chip that may
+ * carry it (owner's small-points rule). v1.0.21-test: the
+ * unfilled glass is the LIVE capsule glass over the player's
+ * recorded poster backdrop, and both paths wear the true-red
+ * press ring while the chip is touched. */
 @Composable
 private fun PlayerChip(
     onClick: () -> Unit,
+    filledRed: Boolean = false,
+    backdrop: BackdropState? = null,
+    glassBlurPx: Float = 0f,
     content: @Composable () -> Unit,
 ) {
+    val pressSource = remember { MutableInteractionSource() }
+    val pressed by pressSource.collectIsPressedAsState()
+    val shape = RoundedCornerShape(50)
     Box(
         modifier = Modifier
-            .size(48.dp)
-            .clip(CircleShape)
-            .background(ForteColors.GlassFill)
-            .border(1.dp, ForteColors.GlassBorder, CircleShape)
-            .clickable { onClick() },
+            .width(58.dp)
+            .height(48.dp)
+            .clip(shape)
+            .then(
+                if (filledRed) {
+                    Modifier.background(ForteColors.TrueRed, shape)
+                } else {
+                    Modifier.liveCapsuleGlass(backdrop, shape, glassBlurPx)
+                },
+            )
+            .trueRedPressRing(shape, pressed)
+            .clickable(interactionSource = pressSource, indication = LocalIndication.current) { onClick() },
         contentAlignment = Alignment.Center,
     ) { content() }
 }

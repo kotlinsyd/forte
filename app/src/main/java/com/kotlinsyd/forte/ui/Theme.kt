@@ -18,6 +18,14 @@ object ForteColors {
     val Text = Color(0xFFFFFFFF)
     val TextDim = Color(0xFF9C9CA6)
     val Red = Color(0xFFE5484D)
+    // TRUE RED (v1.0.20-test, owner's correction: "its not true red").
+    // The shipped Red above (#E5484D) is a muted rose — only ~69%
+    // saturated — so the small accent points now use this pure, solid
+    // red (#FF0000) instead. SCOPE: the player's small points only —
+    // the seek bar's played portion, the liked thumb-up fill, the
+    // disliked thumb-down glyph, and the pause glyph/buffering ring.
+    // Every other surface keeps Red; nothing large wears this.
+    val TrueRed = Color(0xFFFF0000)
     val GlassFill = Color(0x14FFFFFF) // white 8%
     val GlassFillHi = Color(0x2EFFFFFF) // white 18%
     val GlassBorder = Color(0x24FFFFFF) // white 14%

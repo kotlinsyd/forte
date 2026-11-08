@@ -249,8 +249,15 @@ class PlayerService : Service() {
                 .setContentIntent(contentIntent)
                 .build()
         }
-        startForeground(NOTIF_ID, notification)
-        foreground = true
+        // FORTE-8 guard: startForeground can be refused outright
+        // (ForegroundServiceStartNotAllowedException) when the
+        // system will not promote us — the refusal must never take
+        // playback down with it. On a refusal we stay out of
+        // foreground and the next update() retries the promotion.
+        val promoted = runCatching {
+            startForeground(NOTIF_ID, notification)
+        }.isSuccess
+        foreground = promoted
     }
 
     /**
@@ -265,17 +272,28 @@ class PlayerService : Service() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        startForeground(
-            NOTIF_ID,
-            NotificationCompat.Builder(this, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle(getString(R.string.app_name))
-                .setContentText("Preparing playback")
-                .setContentIntent(contentIntent)
-                .setOngoing(true)
-                .build()
-        )
-        foreground = true
+        // FORTE-8 fix (v1.0.18): this call itself can be refused —
+        // ForegroundServiceStartNotAllowedException when Android
+        // will not let a background-started service promote (the
+        // FORTE-7 refusal, which recurred ON v1.0.17 through this
+        // exact path from onCreate). v1.0.17 only made the call
+        // EARLY; it never fenced the call. Fence it: a refusal
+        // leaves [foreground] false so the next start/update
+        // retries the promotion, and playback continues instead of
+        // the app dying at service create.
+        val promoted = runCatching {
+            startForeground(
+                NOTIF_ID,
+                NotificationCompat.Builder(this, CHANNEL_ID)
+                    .setSmallIcon(R.drawable.ic_notification)
+                    .setContentTitle(getString(R.string.app_name))
+                    .setContentText("Preparing playback")
+                    .setContentIntent(contentIntent)
+                    .setOngoing(true)
+                    .build()
+            )
+        }.isSuccess
+        if (promoted) foreground = true
     }
 
     companion object {

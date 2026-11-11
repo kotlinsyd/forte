@@ -60,7 +60,7 @@ class PlayerService : Service() {
         // be the first foreground call. Go foreground NOW with a
         // minimal notification; update() swaps in the rich one (same
         // NOTIF_ID) as soon as a track is ready.
-        ensureForeground()
+        val foregroundOk = ensureForeground()
         // NB: inside apply{} the name "controller" means the session's
         // MediaControllerCompat, so capture ours under a different name.
         val ctl = controller
@@ -93,6 +93,18 @@ class PlayerService : Service() {
                 }
             }
         }
+        if (!foregroundOk) {
+            // FORTE-8, second half: the promotion was refused at create
+            // (a background start Android would not promote — headset /
+            // car / widget starts on strict phones). Staying alive
+            // unpromoted is worse than leaving: the start deadline is
+            // still ticking and the system would kill the whole app
+            // with a RemoteServiceException when it lapses. Stepping
+            // aside costs nothing — playback lives in the controller,
+            // not in this shell, and the next play press (a user
+            // action, always an allowed start) brings the shell back.
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -101,7 +113,13 @@ class PlayerService : Service() {
         // notification synchronously before handling anything else.
         // While a track's rich notification is up this is a no-op, so
         // media-button/widget restarts never clobber it.
-        ensureForeground()
+        if (!ensureForeground()) {
+            // FORTE-8: a refused re-promotion on a restart — the same
+            // step-aside rule as onCreate. A dangling start deadline
+            // must never be left for the system to turn into a crash.
+            stopSelf()
+            return START_NOT_STICKY
+        }
         // Media-button intents arrive via the manifest MediaButtonReceiver,
         // which restarts this service with the key event attached.
         if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
@@ -155,13 +173,17 @@ class PlayerService : Service() {
             }
         }
         // Keep the home-screen widget in step with the notification —
-        // but only when what it shows actually changed.
+        // but only when what it shows actually changed. Fenced: the
+        // widget is decoration and must never be able to throw into
+        // the player service (FORTE-C).
         val key = "${track.id}|${state.playing}|${artwork != null}"
         if (key != widgetKey) {
             widgetKey = key
-            com.kotlinsyd.forte.widget.ForteWidget.push(
-                this, track.title, track.artist, state.playing, artwork,
-            )
+            runCatching {
+                com.kotlinsyd.forte.widget.ForteWidget.push(
+                    this, track.title, track.artist, state.playing, artwork,
+                )
+            }
         }
         session.setMetadata(
             MediaMetadataCompat.Builder()
@@ -263,10 +285,12 @@ class PlayerService : Service() {
     /**
      * Post the minimal foreground notification if we are not already
      * foreground. Synchronous and network-free, so it always lands
-     * inside startForegroundService's deadline.
+     * inside startForegroundService's deadline. Returns true when the
+     * service is foreground (or already was); false when Android
+     * refused the promotion outright (FORTE-8).
      */
-    private fun ensureForeground() {
-        if (foreground) return
+    private fun ensureForeground(): Boolean {
+        if (foreground) return true
         val contentIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
@@ -294,16 +318,38 @@ class PlayerService : Service() {
             )
         }.isSuccess
         if (promoted) foreground = true
+        return promoted
     }
 
     companion object {
         private const val CHANNEL_ID = "playback"
         private const val NOTIF_ID = 1
 
+        /**
+         * True when the last [start] was refused outright by Android
+         * (a background startForegroundService on Android 12+ from a
+         * state with no exemption). ForteApp retries the start the
+         * next time the user brings the app to the foreground, where
+         * a start is always allowed (FORTE-8).
+         */
+        @Volatile
+        var startRefused = false
+            private set
+
         fun start(context: Context) {
-            ContextCompat.startForegroundService(
-                context, Intent(context, PlayerService::class.java)
-            )
+            // FORTE-8: the START call itself can be refused, not just
+            // the promotion inside the service — an unfenced throw
+            // here would crash whatever playback action asked for the
+            // service (including background ones, like a track change
+            // completing while the phone is locked). Fence it, flag
+            // it, and let playback continue without the shell until
+            // the foreground retry lands.
+            val started = runCatching {
+                ContextCompat.startForegroundService(
+                    context, Intent(context, PlayerService::class.java)
+                )
+            }.isSuccess
+            startRefused = !started
         }
     }
 }

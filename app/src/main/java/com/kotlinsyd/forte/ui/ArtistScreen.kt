@@ -14,7 +14,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -203,11 +205,15 @@ fun ArtistScreen(
                         Spacer(Modifier.height(20.dp))
                         SectionHeader("Albums", modifier = Modifier.padding(horizontal = 20.dp))
                         Spacer(Modifier.height(10.dp))
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = 20.dp),
+                        // FORTE-9: plain scrollable Row, not a LazyRow
+                        // (nested-lazy focus-search freeze — see Home).
+                        Row(
+                            modifier = Modifier
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 20.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                         ) {
-                            items(albums) { album ->
+                            albums.forEach { album ->
                                 Column(
                                     modifier = Modifier
                                         .width(156.dp)

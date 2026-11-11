@@ -15,7 +15,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -368,11 +370,20 @@ fun HomeScreen(
                 Spacer(Modifier.height(26.dp))
                 SectionHeader(shelf.title, modifier = Modifier.padding(horizontal = 20.dp))
                 Spacer(Modifier.height(12.dp))
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 20.dp),
+                // FORTE-9: a plain scrollable Row, not a LazyRow — a
+                // lazy list nested inside the Home lazy column makes a
+                // TV remote's focus search re-measure both lists and
+                // every card between on the main thread for one key
+                // press, which froze a low-end TV box into an ANR.
+                // Shelves are short, so an eager Row measures once,
+                // cheaply, and looks and scrolls the same.
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    items(shelf.tracks) { track ->
+                    shelf.tracks.forEach { track ->
                         Column(
                             modifier = Modifier
                                 .width(156.dp)
@@ -390,7 +401,7 @@ fun HomeScreen(
                             )
                         }
                     }
-                    items(shelf.cards) { card ->
+                    shelf.cards.forEach { card ->
                         Column(
                             modifier = Modifier
                                 .width(156.dp)
@@ -471,11 +482,16 @@ fun HomeScreen(
                 Spacer(Modifier.height(26.dp))
                 SectionHeader("Made for you", modifier = Modifier.padding(horizontal = 20.dp))
                 Spacer(Modifier.height(12.dp))
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 20.dp),
+                // FORTE-9: plain scrollable Row, not a LazyRow
+                // (nested-lazy focus-search freeze — see the shelf
+                // row above).
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    items(playlists) { playlist ->
+                    playlists.forEach { playlist ->
                         val count by app.library.playlistCount(playlist.id)
                             .collectAsState(initial = 0)
                         val tracks by app.library.playlistTracks(playlist.id)
@@ -849,11 +865,15 @@ fun MoodScreen(
                     }
                     if (shelf.cards.isNotEmpty()) {
                         item {
-                            LazyRow(
-                                contentPadding = PaddingValues(horizontal = 20.dp),
+                            // FORTE-9: plain scrollable Row, not a
+                            // LazyRow (nested-lazy freeze — see Home).
+                            Row(
+                                modifier = Modifier
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(horizontal = 20.dp),
                                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                             ) {
-                                items(shelf.cards) { card ->
+                                shelf.cards.forEach { card ->
                                     Column(
                                         modifier = Modifier
                                             .width(156.dp)

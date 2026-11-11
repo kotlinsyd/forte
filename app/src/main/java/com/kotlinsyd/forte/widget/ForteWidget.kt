@@ -54,7 +54,18 @@ class ForteWidget : AppWidgetProvider() {
             playing: Boolean,
             art: Bitmap?,
         ) {
-            val manager = AppWidgetManager.getInstance(context)
+            // FORTE-C fix: on devices with no widget system at all
+            // (Wear OS watches, most TVs) AppWidgetManager.getInstance()
+            // returns null, and the next line used to call
+            // getAppWidgetIds on that null — an NPE that took the
+            // player service down on a watch. The widget is decoration:
+            // skip the push entirely where widgets cannot exist, and
+            // null-check the manager everywhere else.
+            if (!context.packageManager.hasSystemFeature(
+                    android.content.pm.PackageManager.FEATURE_APP_WIDGETS
+                )
+            ) return
+            val manager = AppWidgetManager.getInstance(context) ?: return
             val ids = manager.getAppWidgetIds(ComponentName(context, ForteWidget::class.java))
             if (ids.isEmpty()) return
             val views = RemoteViews(context.packageName, R.layout.widget_forte)

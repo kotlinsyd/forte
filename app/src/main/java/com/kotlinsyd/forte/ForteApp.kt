@@ -101,6 +101,14 @@ class ForteApp : Application(), ImageLoaderFactory {
                 startedActivities++
                 appForeground.value = startedActivities > 0
                 if (startedActivities == 1) {
+                    if (PlayerService.startRefused) {
+                        // FORTE-8: an earlier background start of the
+                        // playback shell was refused by Android. The
+                        // user has now brought the app forward, where
+                        // a start is always allowed — retry it so the
+                        // shell exists before the next play press.
+                        PlayerService.start(this@ForteApp)
+                    }
                     // Install/session counting in Forte's own stats lane.
                     CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                         runCatching { AppStats.trackLaunch(this@ForteApp) }

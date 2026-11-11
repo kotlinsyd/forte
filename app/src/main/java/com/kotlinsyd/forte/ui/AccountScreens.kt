@@ -9,6 +9,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -151,6 +152,20 @@ fun LoginScreen(
     var webView by remember { mutableStateOf<WebView?>(null) }
     var account by remember { mutableStateOf<YtAccount.AccountInfo?>(null) }
     var checking by remember { mutableStateOf(false) }
+    // FORTE-B: Wear OS has no WebView provider at all — the WebView
+    // constructor itself throws UnsupportedOperationException out of
+    // WebViewFactory and kills the app (Xiaomi Watch 2, Sentry
+    // FORTE-B). On a watch this sign-in page can never work, so the
+    // screen shows an honest message instead of building a WebView.
+    // webViewFailed covers the same throw on any other device whose
+    // WebView provider is missing or broken.
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val isWatch = remember {
+        // The feature's string name — PackageManager has no
+        // FEATURE_WEARABLE constant (checked against the SDK jar).
+        context.packageManager.hasSystemFeature("android.hardware.type.watch")
+    }
+    var webViewFailed by remember { mutableStateOf(false) }
 
     // Watch the cookie store: once Google has issued a session, fetch
     // who it belongs to and let the USER confirm before closing.
@@ -184,9 +199,33 @@ fun LoginScreen(
     Column(Modifier.fillMaxSize()) {
         ListHeader("Sign in", "Use your Google account on Google's own page", onBack)
         Box(Modifier.weight(1f).fillMaxWidth()) {
+            if (isWatch || webViewFailed) {
+                // FORTE-B fallback (see above): no WebView exists on
+                // this device, so there is no sign-in page to show.
+                Column(
+                    Modifier.fillMaxSize().padding(24.dp),
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text(
+                        "Sign-in can't open on this device",
+                        color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Google's sign-in page needs a web view, and this device doesn't have one. " +
+                            "You can keep listening without an account — sign-in only adds your YouTube likes and playlists.",
+                        color = ForteColors.TextDim, fontSize = 14.sp,
+                    )
+                }
+            } else {
             AndroidView(
                 factory = { ctx ->
-                    WebView(ctx).apply {
+                    // FORTE-B fence: if the WebView provider is missing
+                    // the constructor throws — catch it and swap this
+                    // screen to the fallback message above instead of
+                    // crashing the whole app.
+                    runCatching {
+                        WebView(ctx).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         // No user-agent override: Google rejects sign-in
@@ -200,10 +239,15 @@ fun LoginScreen(
                         webViewClient = WebViewClient()
                         loadUrl(LOGIN_URL)
                         webView = this
+                        }
+                    }.getOrElse {
+                        webViewFailed = true
+                        android.widget.TextView(ctx)
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
+            }
         }
         if (account != null || checking) {
             Column(

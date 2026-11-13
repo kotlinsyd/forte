@@ -14,8 +14,8 @@ android {
         applicationId = "com.kotlinsyd.forte"
         minSdk = 26
         targetSdk = 35
-        versionCode = 28
-        versionName = "1.0.19"
+        versionCode = 37
+        versionName = "1.0.20"
 
         // === SENTRY DSN (Forte's own project) ==========================
         // The DSN of Forte's own Sentry project is read from a private

@@ -202,6 +202,22 @@ interface ForteDao {
 
     @Query("UPDATE downloads SET thumbUrl = :url WHERE videoId = :id AND (thumbUrl IS NULL OR thumbUrl = '')")
     suspend fun fillDownloadThumb(id: String, url: String)
+
+    // Upgrade writes (v1.0.24-test): unlike the fills above, these
+    // OVERWRITE an existing thumb — a resolved album cover
+    // replacing the video frame a row was saved with, so the
+    // final poster is what's stored (and first-painted).
+    @Query("UPDATE history SET thumbUrl = :url WHERE videoId = :id")
+    suspend fun setHistoryThumb(id: String, url: String)
+
+    @Query("UPDATE favorites SET thumbUrl = :url WHERE videoId = :id")
+    suspend fun setFavoriteThumb(id: String, url: String)
+
+    @Query("UPDATE playlist_tracks SET thumbUrl = :url WHERE videoId = :id")
+    suspend fun setPlaylistThumb(id: String, url: String)
+
+    @Query("UPDATE downloads SET thumbUrl = :url WHERE videoId = :id")
+    suspend fun setDownloadThumb(id: String, url: String)
 }
 
 @Database(

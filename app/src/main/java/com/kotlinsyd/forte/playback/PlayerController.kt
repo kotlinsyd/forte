@@ -12,6 +12,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.kotlinsyd.forte.data.ForteEngine
 import com.kotlinsyd.forte.data.Library
+import com.kotlinsyd.forte.data.ResolvedAudio
 import com.kotlinsyd.forte.data.SettingsStore
 import com.kotlinsyd.forte.data.Track
 import com.kotlinsyd.forte.data.YtAccount
@@ -128,6 +129,39 @@ class PlayerController(
     /** Set by the app: starts the foreground service when playback begins. */
     var ensureService: () -> Unit = {}
 
+    /** Set by the app: surfaces a track failure OUTSIDE the player
+     * too (the app-wide toast) — the in-player error pill alone
+     * was invisible to anyone browsing with the mini player
+     * (v1.0.24-test). */
+    var onUserMessage: ((String) -> Unit)? = null
+
+    // Downloaded-file failures (v1.0.24-test): a corrupt or
+    // partial download used to loop recovery forever — the local
+    // path never rotates rungs, so attemptedClients never filled
+    // and the same broken file was reloaded endlessly. Failures
+    // are counted per track; after two, the file is bypassed and
+    // the track streams instead.
+    private val localFailures = mutableMapOf<String, Int>()
+    private var currentIsLocal = false
+
+    // Background boundary check (v1.0.27-test): a FRESH resolve
+    // gates on pass 1 only, so a song can start on a URL whose
+    // past-the-boundary window refuses — the class that dies
+    // about a minute in. While such a song plays, its boundary
+    // is checked once behind it; on a refusal a fallback is
+    // resolved at once (recovery rules: the full probe, the
+    // tried rungs excluded) and held in [preparedFallback], so
+    // when the death surfaces the switch is a cut to a proven
+    // stream, not a stall while the rotation probes. Keyed by
+    // track id; consumed only while its rung is still untried.
+    private var boundaryJob: Job? = null
+    private var preparedFallback: PreparedFallback? = null
+
+    private data class PreparedFallback(
+        val trackId: String,
+        val resolved: ResolvedAudio,
+    )
+
     /** Set by the service: called when the queue is exhausted or cleared. */
     var onPlaybackStopped: () -> Unit = {}
 
@@ -171,6 +205,10 @@ class PlayerController(
                     Player.STATE_READY -> {
                         lastAdvanceAtMs = System.currentTimeMillis()
                         lastBufferedPosMs = player.bufferedPosition
+                        // A track that reached READY has proved
+                        // its local file (if any) — forget earlier
+                        // local failures for it.
+                        state.value.current?.let { localFailures.remove(it.id) }
                         state.value = state.value.copy(
                             buffering = false,
                             durationMs = player.duration.coerceAtLeast(0),
@@ -513,6 +551,9 @@ class PlayerController(
     private fun resetAttempts() {
         attemptedClients.clear()
         servingClientId = null
+        boundaryJob?.cancel()
+        boundaryJob = null
+        preparedFallback = null
     }
 
     /**
@@ -525,12 +566,15 @@ class PlayerController(
      */
     private fun recoverFromFailure() {
         val track = state.value.current ?: return
+        // A failed LOCAL file counts toward its bypass (see
+        // localFailures) — the rotation below never sees it,
+        // because a local load has no serving client.
+        if (currentIsLocal) {
+            localFailures[track.id] = (localFailures[track.id] ?: 0) + 1
+        }
         servingClientId?.let { attemptedClients += it }
         if (attemptedClients.size >= LADDER_RUNGS) {
-            state.value = state.value.copy(
-                buffering = false,
-                error = "Couldn't play \"${track.title}\"",
-            )
+            failCurrentTrack(track, neverReason = null)
             return
         }
         val pos = runCatching { player.currentPosition }.getOrDefault(0L)
@@ -540,10 +584,44 @@ class PlayerController(
         loadCurrent()
     }
 
+    /**
+     * A track has failed for good (v1.0.24-test): every rung is
+     * spent, or the resolve itself refused. The queue no longer
+     * stops dead on the failed song — the failure is announced
+     * (the in-player pill AND the app toast, so it is visible
+     * outside the player too) and playback moves on to the next
+     * track. A refusal that can never play as a guest (age gate,
+     * sign-in wall, region) says its plain reason instead of a
+     * generic error. Repeat-one and the end of the queue still
+     * stop — there is nothing honest to skip to.
+     */
+    private fun failCurrentTrack(track: Track, neverReason: String?) {
+        val message = if (neverReason != null) {
+            "\"${track.title}\" $neverReason"
+        } else {
+            "Couldn't play \"${track.title}\""
+        }
+        onUserMessage?.invoke(message)
+        val s = state.value
+        val canSkip = s.queue.size > 1 && s.repeat != RepeatMode.ONE &&
+            (s.index < s.queue.lastIndex || s.repeat == RepeatMode.ALL)
+        if (canSkip && next(manual = true)) {
+            state.value = state.value.copy(error = message)
+        } else {
+            state.value = state.value.copy(buffering = false, error = message)
+        }
+    }
+
     private fun loadCurrent() {
         val track = state.value.current ?: return
         maybeRefillRadio()
         resolveJob?.cancel()
+        // A new load supersedes the previous stream's background
+        // boundary check; a fallback it already prepared survives
+        // (it belongs to this track's recovery) and is consumed
+        // below if its rung is still untried.
+        boundaryJob?.cancel()
+        boundaryJob = null
         // Fast switching: the old song stops NOW, the moment the new
         // one is chosen — it never plays on while the new stream
         // resolves. The UI shows the buffering state instead.
@@ -553,30 +631,71 @@ class PlayerController(
             player.stop()
         }
         player.volume = 1f
+        // Error state is per-track (v1.0.31-test): a new load
+        // starts clean, so a previous track's failure can never
+        // ride into this one. (failCurrentTrack sets its
+        // announcement AFTER next() has run this load, so the
+        // skipped song's message still lands.)
         state.value = state.value.copy(
             buffering = true, playing = false, positionMs = 0, durationMs = 0,
+            error = null,
         )
         saveSession()
         resolveJob = scope.launch {
             player.skipSilenceEnabled = settings.settings.value.skipSilence
             var streamLabel: String? = null
+            // The stream this load ends up serving (null for a
+            // local file) and whether the load began as a FRESH
+            // resolve — no rung tried yet — which is what makes
+            // the stream a candidate for the background boundary
+            // check behind it (v1.0.27-test).
+            var streamed: ResolvedAudio? = null
+            var streamedLowData = false
+            val freshResolve = attemptedClients.isEmpty()
             val uri = try {
-                val local = library.downloadedFile(track.id)
+                // A downloaded file that has already failed twice
+                // is bypassed — the track streams instead of
+                // looping on a corrupt file (v1.0.24-test).
+                val local = if ((localFailures[track.id] ?: 0) >= 2) {
+                    null
+                } else {
+                    library.downloadedFile(track.id)
+                }
+                currentIsLocal = local != null
                 if (local != null) {
                     streamLabel = "Saved file · offline"
                     android.net.Uri.fromFile(File(local)).toString()
                 } else {
                     val lowData = settings.settings.value.dataSaver && isMetered()
+                    // A fallback the background boundary check
+                    // pre-resolved for THIS track (full recovery
+                    // probe, behind the song that just died) is
+                    // consumed first — the switch is a cut, not
+                    // a fresh probing stall (v1.0.27-test). A
+                    // fallback whose rung has since been tried
+                    // is stale and falls through to the resolve.
+                    val prepared = preparedFallback
+                        ?.takeIf {
+                            it.trackId == track.id &&
+                                it.resolved.clientId !in attemptedClients
+                        }
+                    if (prepared != null) preparedFallback = null
                     // Forte's own engine — the only engine. On a
                     // recovery rotation the rungs already tried are
                     // excluded and the visitor id is refreshed.
-                    val resolved = ForteEngine.resolve(
+                    val resolved = prepared?.resolved ?: ForteEngine.resolve(
                         videoId = track.id,
                         quality = effectiveQuality(),
                         lowData = lowData,
                         excludeClients = attemptedClients,
                         refreshVisitor = attemptedClients.isNotEmpty(),
+                        // A rotation with tried rungs IS a
+                        // recovery re-resolve: exempt from the
+                        // 25 s fresh-resolve budget (v1.0.25-test).
+                        recovery = attemptedClients.isNotEmpty(),
                     )
+                    streamed = resolved
+                    streamedLowData = lowData
                     servingClientId = resolved.clientId
                     if (resolved.clientId.isNotBlank()) {
                         attemptedClients += resolved.clientId
@@ -592,10 +711,12 @@ class PlayerController(
                     resolved.url
                 }
             } catch (e: Exception) {
-                state.value = state.value.copy(
-                    buffering = false,
-                    error = "Couldn't load \"${track.title}\"",
-                )
+                // Fail over, don't halt (v1.0.24-test): announce
+                // and move to the next track. A refusal that can
+                // never play as a guest carries its plain reason.
+                val neverReason =
+                    (e as? ForteEngine.RefusalException)?.userReason
+                failCurrentTrack(track, neverReason)
                 return@launch
             }
             lastBufferedPosMs = -1L
@@ -619,6 +740,60 @@ class PlayerController(
             // and next-track pre-resolution run quietly behind.
             scope.launch(Dispatchers.IO) { YtAccount.registerWatch(track.id) }
             prefetchNext()
+            // Behind a fresh-resolved stream, check the boundary
+            // window once and pre-resolve a proven fallback if it
+            // refuses (v1.0.27-test). A recovery-served stream was
+            // already boundary-proven by its own resolve, and a
+            // consumed prepared fallback likewise — neither needs
+            // the check.
+            val fresh = streamed
+            if (fresh != null && freshResolve) {
+                startBoundaryCheck(track, fresh, streamedLowData)
+            }
+        }
+    }
+
+    /**
+     * The background boundary check for one freshly started
+     * stream (v1.0.27-test): a fresh resolve proved only the
+     * URL's first window, so a boundary-dead URL would die about
+     * a minute in, in front of the listener. Give playback a
+     * head start, then ask the engine whether the past-the-
+     * boundary window serves. If it refuses, resolve a fallback
+     * NOW — recovery rules, full probe, the rungs tried so far
+     * excluded — and hold it in [preparedFallback]; [loadCurrent]
+     * consumes it when the death surfaces, so the switch is a
+     * cut. Fully fenced: a healthy boundary, a track change, a
+     * fallback whose rung got tried meanwhile, or any failure
+     * simply leaves nothing prepared and the normal rotation
+     * runs exactly as before.
+     */
+    private fun startBoundaryCheck(
+        track: Track,
+        resolved: ResolvedAudio,
+        lowData: Boolean,
+    ) {
+        boundaryJob?.cancel()
+        boundaryJob = scope.launch {
+            delay(2_000)
+            val serves = runCatching {
+                ForteEngine.boundaryServes(resolved.url, resolved.sizeBytes)
+            }.getOrDefault(true)
+            if (serves) return@launch
+            if (state.value.current?.id != track.id) return@launch
+            val fallback = runCatching {
+                ForteEngine.resolve(
+                    videoId = track.id,
+                    quality = effectiveQuality(),
+                    lowData = lowData,
+                    excludeClients = attemptedClients.toSet(),
+                    refreshVisitor = true,
+                    recovery = true,
+                )
+            }.getOrNull() ?: return@launch
+            if (state.value.current?.id != track.id) return@launch
+            if (fallback.clientId in attemptedClients) return@launch
+            preparedFallback = PreparedFallback(track.id, fallback)
         }
     }
 
@@ -900,22 +1075,68 @@ class PlayerController(
         saveSession()
     }
 
-    fun next(manual: Boolean) {
+    /**
+     * Advance to the next track; returns true when the queue
+     * actually moved. Disliked songs are skipped silently
+     * (v1.0.29-test, completing the owner's dislike rule):
+     * queue continuation — automatic end-of-track or the Next
+     * button — never lands on a thumbed-down song; the picks
+     * (leanIntoSimilar) already filter them, and an explicit
+     * tap on the song itself (playQueue / jumpTo) still plays
+     * it, because the listener's tap outranks the thumb.
+     */
+    fun next(manual: Boolean): Boolean {
         val s = state.value
-        if (s.queue.isEmpty()) return
+        if (s.queue.isEmpty()) return false
+        val disliked = settings.settings.value.dislikedIds
         val nextIndex = when {
             s.shuffle && s.queue.size > 1 -> {
-                var n = s.index
-                while (n == s.index) n = s.queue.indices.random()
-                n
+                // A shuffle pick steps over disliked songs too;
+                // only when every other song is disliked does
+                // the old any-other-song pick stand.
+                val open = s.queue.indices.filter {
+                    it != s.index && s.queue[it].id !in disliked
+                }
+                if (open.isNotEmpty()) {
+                    open.random()
+                } else {
+                    var n = s.index
+                    while (n == s.index) n = s.queue.indices.random()
+                    n
+                }
             }
-            s.index + 1 <= s.queue.lastIndex -> s.index + 1
-            manual || s.repeat == RepeatMode.ALL -> 0
-            else -> return
+            else -> {
+                // Walk forward from the next slot, stepping
+                // over disliked songs. Wrap only where the old
+                // rule wrapped (a manual press or Repeat All),
+                // and never land back on the current song.
+                var i = s.index + 1
+                var found: Int? = null
+                while (found == null) {
+                    if (i > s.queue.lastIndex) {
+                        if (manual || s.repeat == RepeatMode.ALL) i = 0 else break
+                    }
+                    if (i == s.index) break
+                    if (s.queue[i].id !in disliked) found = i else i++
+                }
+                found ?: when {
+                    // Other slots existed and every one is
+                    // disliked: stay put rather than play one.
+                    s.index + 1 <= s.queue.lastIndex -> return false
+                    // Nothing ahead and no wrap: nowhere to go.
+                    !manual && s.repeat != RepeatMode.ALL -> return false
+                    // The walk wrapped all the way home — the
+                    // current song is the only one left (a
+                    // one-song queue on manual/Repeat All
+                    // replays itself, as before).
+                    else -> s.index
+                }
+            }
         }
         state.value = s.copy(index = nextIndex, error = null)
         resetAttempts()
         loadCurrent()
+        return true
     }
 
     fun previous() {
@@ -1016,9 +1237,11 @@ class PlayerController(
             return
         }
         if (s.radio) maybeRefillRadio()
-        if (s.index < s.queue.lastIndex || s.repeat == RepeatMode.ALL || s.shuffle) {
-            next(manual = false)
-        } else {
+        val canAdvance = s.index < s.queue.lastIndex ||
+            s.repeat == RepeatMode.ALL || s.shuffle
+        if (!canAdvance || !next(manual = false)) {
+            // End of the queue — or everything ahead is
+            // disliked (v1.0.29-test): stop here.
             state.value = s.copy(playing = false, positionMs = 0)
             player.seekTo(0)
             player.pause()
@@ -1031,6 +1254,9 @@ class PlayerController(
         cancelSleepTimer()
         fadeJob?.cancel()
         resolveJob?.cancel()
+        boundaryJob?.cancel()
+        boundaryJob = null
+        preparedFallback = null
         player.stop()
         player.clearMediaItems()
         player.volume = 1f

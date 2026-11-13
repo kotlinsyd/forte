@@ -29,6 +29,22 @@ object ArtworkResolver {
     private val cache = ConcurrentHashMap<String, String>()
     private val misses = ConcurrentHashMap.newKeySet<String>()
 
+    // Hero-frame verdicts (see maxresFrame): video id → the
+    // frame URL the track should carry — maxres when the video
+    // truly has one, its own thumb when it does not. Confirmed
+    // answers only; an unconfirmed probe is never stored.
+    private val frameCache = ConcurrentHashMap<String, String>()
+
+    // The maxres probe gets its own client with a hard call
+    // cap: it reads only the frame's header bytes, never the
+    // full body, and a pathological connection must not hold
+    // the charts load hostage.
+    private val probeHttp = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
+        .callTimeout(8, TimeUnit.SECONDS)
+        .build()
+
     fun needsUpgrade(thumbUrl: String?): Boolean =
         thumbUrl.isNullOrBlank() || thumbUrl.contains("i.ytimg.com")
 
@@ -136,5 +152,64 @@ object ArtworkResolver {
         val artistOk = wantArtistTokens.isEmpty() ||
             wantArtistTokens.any { gotArtist.contains(it) }
         return if (artistOk) 3 else 2
+    }
+
+    /**
+     * This track with its i.ytimg frame upgraded to
+     * maxresdefault (1280×720) — or null when that is not a
+     * confirmed improvement: non-frame art, a video with no
+     * maxres, or a probe the network left unconfirmed.
+     *
+     * The missing-maxres trap: for a video that has no
+     * maxres, YouTube answers the maxresdefault request with
+     * HTTP 200 and a 120×90 placeholder — success, but not a
+     * poster. The probe therefore reads the frame's REAL
+     * dimensions (a bounds-only decode of the body's head;
+     * the rest of the body is never pulled) and only a
+     * genuinely wide frame counts — the real maxres is 1280
+     * wide, the placeholder 120, so the bar sits at 640. A
+     * non-200 answer (some videos 404 instead of serving the
+     * placeholder) falls back the same way. Both confirmed
+     * answers are cached per video for the process; a
+     * transport failure confirms nothing, is not cached, and
+     * a later load may retry it.
+     *
+     * Callers bake the answer into the track BEFORE display
+     * (charts does, at parse), so the chosen URL rides the
+     * track into the hero, the poster prefetch and any saved
+     * row — no visible card ever swaps its picture late.
+     */
+    suspend fun maxresFrame(track: Track): Track? = withContext(Dispatchers.IO) {
+        val thumb = track.thumbUrl?.takeIf { it.isNotBlank() }
+            ?: return@withContext null
+        if (!thumb.contains("i.ytimg.com")) return@withContext null
+        if (thumb.contains("maxresdefault.jpg")) return@withContext null
+        frameCache[track.id]?.let { chosen ->
+            return@withContext if (chosen == thumb) null else track.copy(thumbUrl = chosen)
+        }
+        val maxres = "https://i.ytimg.com/vi/${track.id}/maxresdefault.jpg"
+        val hasMaxres: Boolean? = runCatching {
+            val req = Request.Builder().url(maxres)
+                .header("User-Agent", "Forte/1.0")
+                .build()
+            probeHttp.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    false
+                } else {
+                    val opts = android.graphics.BitmapFactory.Options().apply {
+                        inJustDecodeBounds = true
+                    }
+                    resp.body?.byteStream()?.let { stream ->
+                        android.graphics.BitmapFactory.decodeStream(stream, null, opts)
+                    }
+                    opts.outWidth >= 640
+                }
+            }
+        }.getOrNull()
+        // Unconfirmed (transport failure): cache nothing,
+        // change nothing.
+        if (hasMaxres == null) return@withContext null
+        frameCache[track.id] = if (hasMaxres) maxres else thumb
+        if (hasMaxres) track.copy(thumbUrl = maxres) else null
     }
 }

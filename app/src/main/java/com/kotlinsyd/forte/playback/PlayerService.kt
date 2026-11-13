@@ -68,7 +68,9 @@ class PlayerService : Service() {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() = ctl.resume()
                 override fun onPause() = ctl.pause()
-                override fun onSkipToNext() = ctl.next(manual = true)
+                override fun onSkipToNext() {
+                    ctl.next(manual = true)
+                }
                 override fun onSkipToPrevious() = ctl.previous()
                 override fun onSeekTo(pos: Long) = ctl.seekTo(pos)
                 override fun onStop() = ctl.stopAndClear()

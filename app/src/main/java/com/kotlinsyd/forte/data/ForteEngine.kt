@@ -32,16 +32,34 @@ import java.util.concurrent.TimeUnit
  *  - Guest only: resolution and search never carry the account
  *    cookies. The signed-in session belongs to the account layer
  *    (library, likes, history); playback identity is the client's.
- *  - Direct-URL clients with SABR off, verdict/bench discipline:
- *    a client that refuses a track is benched for ten minutes.
+ *  - Direct-URL clients with SABR off, verdict/bench discipline
+ *    (reworked v1.0.24-test, extended v1.0.27-test): a client-wide
+ *    refusal (the LOGIN_REQUIRED / bot-wall class) benches a
+ *    client, for ten minutes. The old build benched a client for
+ *    ten minutes on ANY failure — one unplayable song or one
+ *    slow-network probe timeout benched healthy routes, and then
+ *    every song failed in bursts. A per-track refusal never
+ *    benches; a network failure benches for at most a minute.
+ *    Rung-health memory adds two evidence-based benches at the
+ *    same ten minutes: a rung whose URL dies mid-play, and a rung
+ *    that proves probe-dead during a recovery walk — both are the
+ *    boundary-dead class made visible, so later songs in the
+ *    session skip a rung that has shown itself unhealthy instead
+ *    of re-paying its cost song after song.
  *  - Nothing is handed to the player until bytes have been
- *    fetched from its URL: every resolved stream is probed with
- *    the exact request the media fetch will make (headers dressed
- *    from the URL's own client stamp, a bounded range window of
- *    the size that client's fetches use, starting past the 1 MiB
- *    boundary some clients' URLs stop honouring), and 16 KiB of
- *    body must actually arrive. A URL can be dead on arrival; the
- *    probe is what turns "spins forever" into "next client, now".
+ *    fetched from its URL — but a FRESH resolve (v1.0.27-test,
+ *    on the probe harness's measurements) gates on the first
+ *    window only: headers plus 8 KiB at offset 0, fetched with
+ *    the exact request the media fetch will make. The full probe
+ *    — the same window PAST the 1 MiB boundary some clients'
+ *    URLs stop honouring, 16 KiB of body — belongs to RECOVERY
+ *    resolves and to the background check that runs behind a
+ *    fresh-resolved song. v1.0.25-test demanded the boundary
+ *    proof up front and paid ~20 s of its 25 s budget re-proving
+ *    rungs whose URLs were boundary-dead (the fresh probe never
+ *    benched them, so every song re-paid it), while v1.0.19's
+ *    harsh bench had quietly acted as rung-health memory and
+ *    skipped the dead rungs from the second song on.
  *  - Media-fetch dressing ([MediaDress]): googlevideo bakes the
  *    minting client into the URL as c=/cver= and compares it
  *    against the headers of the request that comes back for the
@@ -236,18 +254,105 @@ object ForteEngine {
         ),
     )
 
-    /** A refusing client is benched for ten minutes (the verdict
-     * cache discipline) instead of being asked again for every
-     * song in the queue. */
+    /** Bench discipline (v1.0.24-test): the long bench is ONLY
+     * for a client-wide refusal — the client itself is walled
+     * (LOGIN_REQUIRED / "confirm you're not a bot"), so asking it
+     * again for every song in the queue is pointless. A per-track
+     * refusal (UNPLAYABLE, age gate, region) says nothing about
+     * the client's health and NEVER benches; a failure that died
+     * on the network earns at most the short bench. Rung-health
+     * memory (v1.0.27-test) adds two further long benches, both
+     * on direct evidence about the RUNG rather than the track:
+     * a rung whose URL dies mid-play ([onPlaybackRefused]) and
+     * a rung that returns probe-dead during a recovery walk.
+     * Second-chance rule (v1.0.31-test): a bench DEFERS a rung
+     * for later songs — it no longer vetoes it. One song's
+     * recovery cascade could bench the whole ladder, after
+     * which every later song's resolve skipped every rung and
+     * threw without a single attempt (the same "couldn't play"
+     * down the whole queue). A resolve now walks benched rungs
+     * as a second chance when nothing un-benched served (see
+     * [walkPlan]); only the calling track's own exclusions are
+     * absolute. */
     private val benchedUntil = ConcurrentHashMap<String, Long>()
     private const val BENCH_MS = 10 * 60_000L
+    private const val BENCH_SHORT_MS = 60_000L
 
     private fun isBenched(id: String): Boolean =
         (benchedUntil[id] ?: 0L) > System.currentTimeMillis()
 
-    private fun bench(id: String) {
-        benchedUntil[id] = System.currentTimeMillis() + BENCH_MS
+    private fun bench(id: String, ms: Long = BENCH_MS) {
+        benchedUntil[id] = System.currentTimeMillis() + ms
     }
+
+    /**
+     * The order one resolve walks the ladder (v1.0.31-test):
+     * rungs neither excluded nor benched first, in ladder
+     * order; then the benched-but-not-excluded rungs, also in
+     * ladder order, as a second chance. Excluded rungs — the
+     * calling track's own tried set — never appear in either
+     * phase. Pure and internal so the per-track isolation
+     * rule is unit-testable: a bench one song earned may
+     * reorder another song's walk, but it can never empty it.
+     */
+    internal fun walkPlan(
+        rungIds: List<String>,
+        excluded: Set<String>,
+        benched: Set<String>,
+    ): List<String> =
+        rungIds.filter { it !in excluded && it !in benched } +
+            rungIds.filter { it !in excluded && it in benched }
+
+    /** How one ladder rung's attempt ended — resolve() benches,
+     * retries or moves on by this class, never by "it failed". */
+    private sealed interface RungResult {
+        data class Ok(val value: Pair<ResolvedAudio, Long>) : RungResult
+
+        /** The client itself refused (login-required / bot wall):
+         * the long bench applies. */
+        data object ClientRefused : RungResult
+
+        /** This track refused (unplayable / age / region): the
+         * client is healthy; never benches. [neverReason] is the
+         * plain user-facing reason when the refusal can never
+         * play as a guest, else null. */
+        data class TrackRefused(val neverReason: String?) : RungResult
+
+        /** The player call died on the network: short bench. */
+        data object NetworkTrouble : RungResult
+
+        /** The response was fine but every candidate URL failed
+         * the probe (dead URL / unresponsive body). On a fresh
+         * walk this is per-track and never benches; during a
+         * RECOVERY walk the full probe makes it rung evidence —
+         * the rung is benched (rung-health memory, v1.0.27-test). */
+        data object UrlDead : RungResult
+    }
+
+    /** Thrown when a track can NEVER play on the guest engine;
+     * [userReason] is the plain reason ("needs sign-in", …) the
+     * player surfaces instead of a generic error. */
+    class RefusalException(val userReason: String) :
+        Exception("Track refused: $userReason")
+
+    /** The plain reason for a refusal that can never play as a
+     * guest, read from the playability reason text; null when the
+     * refusal is an ordinary per-track "no". */
+    private fun neverPlayReason(reason: String): String? = when {
+        reason.contains("not a bot", ignoreCase = true) -> null
+        reason.contains("sign in", ignoreCase = true) -> "needs sign-in"
+        reason.contains("country", ignoreCase = true) ||
+            reason.contains("region", ignoreCase = true) ->
+            "isn't available in your region"
+        else -> null
+    }
+
+    /** True when the refusal is the client-wide bot wall: the
+     * loud LOGIN_REQUIRED, or the quiet "confirm you're not a
+     * bot" served as a per-track-looking UNPLAYABLE. */
+    private fun isClientWall(status: String?, reason: String): Boolean =
+        status == "LOGIN_REQUIRED" ||
+            reason.contains("not a bot", ignoreCase = true)
 
     // ------------------------------------------------------------------
     // visitorData — minted deliberately, never hoped for
@@ -369,26 +474,90 @@ object ForteEngine {
     private const val AUTH_BOUNDARY_BYTES = 1024L * 1024
     private const val PROBE_READ_BYTES = 16L * 1024
 
+    /** First-pass read: headers plus this much body at offset 0
+     * — all a fresh resolve gates on (see [probeFresh]); the
+     * full probe's first half for a recovery (see [probe]). */
+    private const val PROBE_FIRST_BYTES = 8L * 1024
+
+    /**
+     * Pass 1, standalone (v1.0.27-test): headers plus the first
+     * bytes at offset 0, on the probe's own 6 s leash. This is
+     * ALL a fresh resolve gates on. The measurements behind the
+     * change: v1.0.25-test's fresh walk spent ~20 s of its 25 s
+     * budget re-probing the boundary window of rungs whose URLs
+     * were boundary-dead, and probe-dead outcomes never benched,
+     * so every song re-paid the same ~15 s; on a jittery link the
+     * walk could cross the budget and the song errored before it
+     * ever played. A pass-1-only walk resolves in ~4.4 s. The
+     * boundary risk pass 1 cannot see is carried instead by
+     * rung-health memory (a rung whose URL dies mid-play is
+     * benched for the session) and by the player's background
+     * boundary check, which pre-resolves a proven fallback
+     * while the song plays (see PlayerController).
+     */
+    private fun probeFresh(url: String): Boolean =
+        probeWindow(url, 0L, PROBE_FIRST_BYTES)
+
+    /**
+     * The FULL probe — what a RECOVERY resolve gates on
+     * (v1.0.25-test, kept by v1.0.27-test for recovery only).
+     * Pass 1 first; then, for any file longer than the
+     * boundary, the past-the-boundary window MUST also serve
+     * before the URL is trusted. Some clients' URLs serve the
+     * first megabyte and refuse everything after it (the CDN's
+     * post-1 MiB refusal); v1.0.19's probe knew this and
+     * demanded 16 KiB PAST the boundary before trusting any
+     * URL, and a recovery — the listener is already waiting on
+     * a song that died once — is where that proof belongs.
+     * Short files (and unknown lengths, where no boundary can
+     * be computed) stand on pass 1, as before.
+     */
+    private fun probe(url: String, contentLength: Long): Boolean {
+        if (!probeWindow(url, 0L, PROBE_FIRST_BYTES)) return false
+        val clen = url.toHttpUrlOrNull()?.queryParameter("clen")?.toLongOrNull()
+            ?: contentLength.takeIf { it > 0 }
+        if (clen != null && clen > AUTH_BOUNDARY_BYTES + PROBE_READ_BYTES) {
+            return probeWindow(url, AUTH_BOUNDARY_BYTES, PROBE_READ_BYTES)
+        }
+        return true
+    }
+
+    /** The probe a resolve gates on (v1.0.27-test): pass 1 only
+     * for a fresh resolve, the full boundary-proving probe for
+     * a recovery — see [probeFresh] and [probe]. */
+    private fun serves(url: String, contentLength: Long, recovery: Boolean): Boolean =
+        if (recovery) probe(url, contentLength) else probeFresh(url)
+
+    /**
+     * The background boundary check (v1.0.27-test): does [url]'s
+     * past-the-boundary window serve? True outright for short
+     * or unknown-length files (no boundary can be crossed). The
+     * player runs this once behind a song that started on a
+     * fresh (pass-1-only) resolve; a refusal means the URL will
+     * die about a minute in, so a proven fallback is resolved
+     * before it can.
+     */
+    suspend fun boundaryServes(url: String, contentLength: Long): Boolean =
+        withContext(Dispatchers.IO) {
+            val clen = url.toHttpUrlOrNull()?.queryParameter("clen")?.toLongOrNull()
+                ?: contentLength.takeIf { it > 0 }
+            if (clen == null || clen <= AUTH_BOUNDARY_BYTES + PROBE_READ_BYTES) {
+                true
+            } else {
+                probeWindow(url, AUTH_BOUNDARY_BYTES, PROBE_READ_BYTES)
+            }
+        }
+
     /**
      * Fetch one real window from [url] exactly as the media fetch
      * will: headers dressed from the URL's own client stamp, a
-     * bounded range of the size that client's fetches use, starting
-     * past the 1 MiB boundary when the file is that long (some
-     * clients' URLs serve the first megabyte and refuse everything
-     * after it, so a probe of the opening would pass a URL that
-     * dies a minute into the song). True only when the answer is a
-     * success with an audio content type AND [PROBE_READ_BYTES] of
-     * body actually arrive — headers alone can precede a body that
-     * never comes.
+     * bounded range of the size that client's fetches use,
+     * starting at [start]. True only when the answer is a success
+     * with an audio content type AND [readBytes] of body actually
+     * arrive — headers alone can precede a body that never comes.
      */
-    private fun probe(url: String, contentLength: Long): Boolean {
+    private fun probeWindow(url: String, start: Long, readBytes: Long): Boolean {
         val clen = url.toHttpUrlOrNull()?.queryParameter("clen")?.toLongOrNull()
-            ?: contentLength.takeIf { it > 0 }
-        val start = if (clen != null && clen > AUTH_BOUNDARY_BYTES + PROBE_READ_BYTES) {
-            AUTH_BOUNDARY_BYTES
-        } else {
-            0L
-        }
         val window = MediaDress.rangeBytesFor(url)
         val range = when {
             window != Long.MAX_VALUE ->
@@ -407,7 +576,7 @@ object ForteEngine {
                     !type.startsWith("audio/") -> false
                     resp.body == null -> false
                     else -> runCatching {
-                        resp.body!!.source().request(PROBE_READ_BYTES)
+                        resp.body!!.source().request(readBytes)
                     }.getOrDefault(false)
                 }
             }
@@ -418,19 +587,42 @@ object ForteEngine {
 
     /**
      * A stream the probe cleared has been refused while actually
-     * playing (the datasource reports it). Forget the URL and bench
-     * the client that minted it for this track, so the recovery
-     * re-resolve walks to a different rung instead of re-serving
-     * the same dead door.
+     * playing (the datasource reports it). Forget the URL, so the
+     * recovery re-resolve mints a fresh one instead of re-serving
+     * the same dead door — and bench the minting rung for ten
+     * minutes (v1.0.27-test, rung-health memory): a URL that dies
+     * mid-play is exactly the boundary-dead class the fresh probe
+     * no longer tests for, so the rung that minted it is treated
+     * as unhealthy for the session and later songs skip it — the
+     * skipping v1.0.19's harsh any-failure bench used to arrange
+     * by accident. (v1.0.24-test's no-bench rule stands for
+     * per-track REFUSALS at resolve time; a mid-play death is
+     * rung evidence, not a track refusal.) The rung is read from
+     * the cached resolve; if that entry is already gone, from
+     * the URL's own client stamp.
      */
     fun onPlaybackRefused(url: String, responseCode: Int) {
         if (responseCode !in setOf(403, 404, 410)) return
         if (url.toHttpUrlOrNull()?.host?.endsWith("googlevideo.com") != true) return
         val dead = resolveCache.entries.filter { it.value.resolved.url == url }
-        dead.forEach { (key, cached) ->
-            resolveCache.remove(key)
-            if (cached.resolved.clientId.isNotBlank()) bench(cached.resolved.clientId)
+        val minters = dead.map { it.value.resolved.clientId }.toMutableSet()
+        if (minters.isEmpty()) {
+            rungIdForStamp(url)?.let { minters += it }
         }
+        dead.forEach { (key, _) -> resolveCache.remove(key) }
+        minters.forEach { bench(it) }
+    }
+
+    /** The ladder rung a stream URL was minted by, read from its
+     * c= stamp — the fallback for [onPlaybackRefused] when the
+     * resolve that minted the URL has already left the cache.
+     * The cipher rung's stamp is its client name (MWEB), not its
+     * rung id. Null when the stamp names no rung of ours. */
+    private fun rungIdForStamp(url: String): String? {
+        val stamp = url.toHttpUrlOrNull()?.queryParameter("c")
+            ?.uppercase() ?: return null
+        if (stamp == "MWEB") return CIPHER_ID
+        return stamp.takeIf { id -> ladder.any { it.id == id } }
     }
 
     // ------------------------------------------------------------------
@@ -464,26 +656,45 @@ object ForteEngine {
         return out
     }
 
-    private fun pickFormat(
+    /**
+     * The rung's formats in preference order for the quality
+     * rule — the pick first, then the fallbacks (v1.0.24-test).
+     * The old code picked exactly ONE format per response: when
+     * that URL failed the probe, the whole rung was abandoned
+     * even though the same response carried other working
+     * formats. Callers now walk this list until one passes.
+     */
+    private fun formatCandidates(
         formats: List<Fmt>,
         quality: AudioQuality,
         lowData: Boolean,
-    ): Fmt? {
-        if (formats.isEmpty()) return null
+    ): List<Fmt> {
+        if (formats.isEmpty()) return emptyList()
         val sorted = formats.sortedWith(
             compareByDescending<Fmt> { it.bitrate }
                 .thenByDescending { it.mime.contains("opus", ignoreCase = true) },
         )
         val effective = if (lowData) AudioQuality.LOW else quality
         return when (effective) {
-            AudioQuality.HIGH -> sorted.first()
-            AudioQuality.LOW -> sorted.last()
+            AudioQuality.HIGH -> sorted
+            AudioQuality.LOW -> sorted.reversed()
             AudioQuality.MEDIUM ->
-                sorted.minByOrNull { kotlin.math.abs(it.bitrate - 96_000) } ?: sorted.last()
+                sorted.sortedBy { kotlin.math.abs(it.bitrate - 96_000) }
             AudioQuality.AUTO ->
-                sorted.firstOrNull { it.bitrate <= 170_000 } ?: sorted.first()
+                sorted.filter { it.bitrate <= 170_000 } +
+                    sorted.filter { it.bitrate > 170_000 }
         }
     }
+
+    private fun pickFormat(
+        formats: List<Fmt>,
+        quality: AudioQuality,
+        lowData: Boolean,
+    ): Fmt? = formatCandidates(formats, quality, lowData).firstOrNull()
+
+    /** How many formats of one response get probed before the
+     * rung is given up — bounds a rung's worst-case time. */
+    private const val MAX_FORMAT_TRIES = 3
 
     /** "audio/webm; codecs=opus" → "WebM Opus" for the info line. */
     private fun formatLabel(mime: String): String {
@@ -525,10 +736,17 @@ object ForteEngine {
 
     /**
      * Resolve [videoId] through the client ladder. Every candidate
-     * URL must pass the probe before it is returned. [excludeClients]
+     * URL must pass the probe before it is returned — pass 1 only
+     * on a fresh resolve, the full boundary-proving probe on a
+     * recovery (v1.0.27-test). [excludeClients]
      * names rungs already tried for this track (the player's
      * recovery rotation); [refreshVisitor] forces a fresh visitor
-     * id before the walk. Throws when every rung refused.
+     * id before the walk. [recovery] marks a recovery re-resolve:
+     * those are EXEMPT from the fresh-resolve budget below and
+     * get the much larger recovery budget instead — on a slow
+     * link v1.0.19 ground through recoveries that the
+     * v1.0.24-test 25 s cap now times out (v1.0.25-test).
+     * Throws when every rung refused.
      */
     suspend fun resolve(
         videoId: String,
@@ -536,6 +754,7 @@ object ForteEngine {
         lowData: Boolean = false,
         excludeClients: Set<String> = emptySet(),
         refreshVisitor: Boolean = false,
+        recovery: Boolean = false,
     ): ResolvedAudio = withContext(Dispatchers.IO) {
         val cacheKey = "$videoId|${quality.name}|$lowData"
         resolveCache[cacheKey]?.let {
@@ -550,73 +769,188 @@ object ForteEngine {
             refreshVisitorData()
         }
         var vdRefreshed = refreshVisitor
-        for (spec in ladder) {
-            if (spec.id in excludeClients || isBenched(spec.id)) continue
-            var attempt = 0
-            while (attempt < 2) {
-                attempt++
-                val resolved = runCatching {
-                    resolveVia(spec, videoId, quality, lowData)
-                }.getOrNull()
-                if (resolved != null) {
-                    cachePut(cacheKey, resolved.first, resolved.second)
-                    return@withContext resolved.first
+        // One FRESH resolve never holds a song hostage
+        // (v1.0.24-test): the ladder walk is capped, then the
+        // caller fails over to the next track instead of
+        // spinning silently. A RECOVERY re-resolve is exempt
+        // from that cap (v1.0.25-test): it runs on the
+        // recovery budget, so a slow link gets the same
+        // grinding patience v1.0.19 had.
+        val deadlineMs = System.currentTimeMillis() +
+            if (recovery) RECOVERY_BUDGET_MS else RESOLVE_BUDGET_MS
+        var neverReason: String? = null
+
+        // One rung, with the bench discipline applied by outcome
+        // class. Returns the stream on success, null to move on.
+        suspend fun walk(
+            id: String,
+            useVisitorData: Boolean,
+            attempt: suspend (Long) -> RungResult,
+        ): ResolvedAudio? {
+            var tried = 0
+            while (tried < 2) {
+                tried++
+                if (System.currentTimeMillis() > deadlineMs) return null
+                val result = runCatching { attempt(deadlineMs) }
+                    .getOrElse { RungResult.NetworkTrouble }
+                when (result) {
+                    is RungResult.Ok -> {
+                        // A rung that just served is healthy —
+                        // lift any bench it carried (only a
+                        // second-chance walk can meet one).
+                        benchedUntil.remove(id)
+                        cachePut(cacheKey, result.value.first, result.value.second)
+                        return result.value.first
+                    }
+                    is RungResult.TrackRefused -> {
+                        if (neverReason == null) {
+                            neverReason = result.neverReason
+                        }
+                        return null
+                    }
+                    RungResult.UrlDead -> {
+                        // Rung-health memory (v1.0.27-test): a
+                        // rung that proves probe-dead during a
+                        // RECOVERY walk — where the full probe
+                        // makes the outcome rung evidence — is
+                        // benched for the session, so later songs
+                        // skip it. A fresh walk never benches on
+                        // UrlDead: its pass-1-only probe says
+                        // nothing about the rung's boundary health.
+                        if (recovery) bench(id)
+                        return null
+                    }
+                    RungResult.NetworkTrouble -> {
+                        bench(id, BENCH_SHORT_MS)
+                        return null
+                    }
+                    RungResult.ClientRefused -> {
+                        // One visitorData refresh + retry per
+                        // resolve: a stale/missing visitor id is
+                        // the usual reason a bot-walled client
+                        // refuses. Only if it still refuses is the
+                        // client itself walled — the long bench.
+                        if (useVisitorData && !vdRefreshed) {
+                            vdRefreshed = true
+                            visitorData = null
+                            refreshVisitorData()
+                            continue
+                        }
+                        bench(id)
+                        return null
+                    }
                 }
-                // One visitorData refresh + retry per resolve: a
-                // stale/missing visitor id is the usual reason a
-                // bot-walled client refuses.
-                if (spec.useVisitorData && !vdRefreshed) {
-                    vdRefreshed = true
-                    visitorData = null
-                    refreshVisitorData()
-                    continue
-                }
-                break
             }
-            bench(spec.id)
+            return null
+        }
+
+        // The walk plan (v1.0.31-test): un-benched rungs first,
+        // then — only when they produced nothing — the benched
+        // ones as a second chance. Benches steer the ladder;
+        // they may never EMPTY it. One song's recovery cascade
+        // can bench every rung (each verdict is rung evidence
+        // earned against that song's URLs), and the old loop
+        // then skipped every rung of every later song's fresh
+        // resolve without a single network attempt: each later
+        // song threw instantly and surfaced the same "couldn't
+        // play" until the benches lapsed. Exclusions are not
+        // benches: they are THIS track's own tried rungs and
+        // stay out in both phases (see walkPlan).
+        val specsById = ladder.associateBy { it.id }
+        val plan = walkPlan(
+            ladder.map { it.id },
+            excludeClients,
+            ladder.filter { isBenched(it.id) }.map { it.id }.toSet(),
+        )
+        for (id in plan) {
+            val spec = specsById.getValue(id)
+            walk(spec.id, spec.useVisitorData) { dl ->
+                resolveVia(spec, videoId, quality, lowData, dl, recovery)
+            }?.let { return@withContext it }
+            if (System.currentTimeMillis() > deadlineMs) break
         }
         // Last rung: a ciphered client (MWEB), only usable when the
         // current player JS yields its decipher (see SigDecipher).
-        if (CIPHER_ID !in excludeClients && !isBenched(CIPHER_ID)) {
-            val resolved = runCatching {
-                resolveViaCipher(videoId, quality, lowData)
-            }.getOrNull()
-            if (resolved != null) {
-                cachePut(cacheKey, resolved.first, resolved.second)
-                return@withContext resolved.first
-            }
-            bench(CIPHER_ID)
+        // This point is reached only when no ladder rung served,
+        // so a bench on the cipher rung cannot veto it either
+        // (v1.0.31-test) — only this track's own exclusion can.
+        if (CIPHER_ID !in excludeClients &&
+            System.currentTimeMillis() <= deadlineMs
+        ) {
+            walk(CIPHER_ID, useVisitorData = true) { dl ->
+                resolveViaCipher(videoId, quality, lowData, dl, recovery)
+            }?.let { return@withContext it }
         }
+        // A refusal that can never play as a guest keeps its plain
+        // reason, so the player can say it instead of a generic
+        // "couldn't play".
+        neverReason?.let { throw RefusalException(it) }
         throw IllegalStateException("Forte engine could not resolve $videoId")
     }
 
-    /** @return the resolved stream and its TTL in ms; null when
-     * this rung refused or its URL failed the probe. */
+    /** The whole ladder walk for one FRESH resolve is capped
+     * at this — then the caller fails over to the next track
+     * (v1.0.24-test). Recovery re-resolves are exempt and use
+     * [RECOVERY_BUDGET_MS] instead (v1.0.25-test). */
+    private const val RESOLVE_BUDGET_MS = 25_000L
+
+    /** A recovery re-resolve's budget: the rotation has
+     * already spent the listener's patience once; what it
+     * needs now is v1.0.19's grinding room on a slow link,
+     * not the fresh-resolve cap. */
+    private const val RECOVERY_BUDGET_MS = 120_000L
+
+    /**
+     * One rung's attempt, classified for the bench discipline
+     * (v1.0.24-test): a refused status is read for WHAT refused
+     * (the client wall vs this track), and the probe walks the
+     * response's format candidates instead of gambling on one.
+     * Network deaths inside the player call propagate as
+     * exceptions — resolve() classes them NetworkTrouble.
+     * [recovery] picks the probe (v1.0.27-test): pass 1 only on
+     * a fresh resolve, the full boundary-proving probe on a
+     * recovery.
+     */
     private fun resolveVia(
         spec: ClientSpec,
         videoId: String,
         quality: AudioQuality,
         lowData: Boolean,
-    ): Pair<ResolvedAudio, Long>? {
+        deadlineMs: Long,
+        recovery: Boolean,
+    ): RungResult {
         val root = playerCall(spec, videoId, SigDecipher.FALLBACK_STS)
-        val status = root.optJSONObject("playabilityStatus")
-            ?.optString("status")
-        if (status != "OK") return null
+        val playability = root.optJSONObject("playabilityStatus")
+        val status = playability?.optString("status")
+        if (status != "OK") {
+            val reason = playability?.optString("reason").orEmpty()
+            return if (isClientWall(status, reason)) {
+                RungResult.ClientRefused
+            } else {
+                RungResult.TrackRefused(neverPlayReason(reason))
+            }
+        }
         val formats = audioFormats(root).filter { it.url != null }
-        val picked = pickFormat(formats, quality, lowData) ?: return null
-        if (!probe(picked.url!!, picked.contentLength)) return null
         val expiresSec = root.optJSONObject("streamingData")
             ?.optLong("expiresInSeconds", 21_600L) ?: 21_600L
         val ttl = minOf(MAX_TTL_MS, (expiresSec - 120).coerceAtLeast(60) * 1000L)
-        return ResolvedAudio(
-            url = picked.url!!,
-            format = formatLabel(picked.mime),
-            bitrateKbps = picked.bitrate / 1000,
-            sizeBytes = picked.contentLength,
-            engine = "Forte",
-            userAgent = spec.userAgent,
-            clientId = spec.id,
-        ) to ttl
+        for (candidate in formatCandidates(formats, quality, lowData)
+            .take(MAX_FORMAT_TRIES)) {
+            if (System.currentTimeMillis() > deadlineMs) break
+            if (!serves(candidate.url!!, candidate.contentLength, recovery)) continue
+            return RungResult.Ok(
+                ResolvedAudio(
+                    url = candidate.url!!,
+                    format = formatLabel(candidate.mime),
+                    bitrateKbps = candidate.bitrate / 1000,
+                    sizeBytes = candidate.contentLength,
+                    engine = "Forte",
+                    userAgent = spec.userAgent,
+                    clientId = spec.id,
+                ) to ttl,
+            )
+        }
+        return RungResult.UrlDead
     }
 
     private const val CIPHER_ID = "MWEB_CIPHER"
@@ -631,9 +965,12 @@ object ForteEngine {
         videoId: String,
         quality: AudioQuality,
         lowData: Boolean,
-    ): Pair<ResolvedAudio, Long>? {
+        deadlineMs: Long,
+        recovery: Boolean,
+    ): RungResult {
         SigDecipher.ensureLoaded()
-        val sts = SigDecipher.signatureTimestamp() ?: return null
+        val sts = SigDecipher.signatureTimestamp()
+            ?: return RungResult.NetworkTrouble
         val spec = ClientSpec(
             id = CIPHER_ID,
             apiKey = WEB_KEY,
@@ -644,30 +981,45 @@ object ForteEngine {
             buildClient = { hl, gl -> clientJson("MWEB", "2.20250501.01.00", hl, gl) },
         )
         val root = playerCall(spec, videoId, sts)
-        val status = root.optJSONObject("playabilityStatus")
-            ?.optString("status")
-        if (status != "OK") return null
+        val playability = root.optJSONObject("playabilityStatus")
+        val status = playability?.optString("status")
+        if (status != "OK") {
+            val reason = playability?.optString("reason").orEmpty()
+            return if (isClientWall(status, reason)) {
+                RungResult.ClientRefused
+            } else {
+                RungResult.TrackRefused(neverPlayReason(reason))
+            }
+        }
         val formats = audioFormats(root).filter { it.cipher != null }
-        val picked = pickFormat(formats, quality, lowData) ?: return null
-        val parts = parseQuery(picked.cipher!!)
-        val s = parts["s"] ?: return null
-        val base = parts["url"] ?: return null
-        val sp = parts["sp"] ?: "sig"
-        val sig = SigDecipher.decipher(s) ?: return null
-        val url = base + "&" + sp + "=" + URLEncoder.encode(sig, "UTF-8")
-        if (!probe(url, picked.contentLength)) return null
         val expiresSec = root.optJSONObject("streamingData")
             ?.optLong("expiresInSeconds", 21_600L) ?: 21_600L
         val ttl = minOf(MAX_TTL_MS, (expiresSec - 120).coerceAtLeast(60) * 1000L)
-        return ResolvedAudio(
-            url = url,
-            format = formatLabel(picked.mime),
-            bitrateKbps = picked.bitrate / 1000,
-            sizeBytes = picked.contentLength,
-            engine = "Forte",
-            userAgent = spec.userAgent,
-            clientId = CIPHER_ID,
-        ) to ttl
+        // Same candidate walk as the direct rungs (v1.0.24-test):
+        // decipher + probe each candidate until one serves.
+        for (candidate in formatCandidates(formats, quality, lowData)
+            .take(MAX_FORMAT_TRIES)) {
+            if (System.currentTimeMillis() > deadlineMs) break
+            val parts = parseQuery(candidate.cipher!!)
+            val s = parts["s"] ?: continue
+            val base = parts["url"] ?: continue
+            val sp = parts["sp"] ?: "sig"
+            val sig = SigDecipher.decipher(s) ?: continue
+            val url = base + "&" + sp + "=" + URLEncoder.encode(sig, "UTF-8")
+            if (!serves(url, candidate.contentLength, recovery)) continue
+            return RungResult.Ok(
+                ResolvedAudio(
+                    url = url,
+                    format = formatLabel(candidate.mime),
+                    bitrateKbps = candidate.bitrate / 1000,
+                    sizeBytes = candidate.contentLength,
+                    engine = "Forte",
+                    userAgent = spec.userAgent,
+                    clientId = CIPHER_ID,
+                ) to ttl,
+            )
+        }
+        return RungResult.UrlDead
     }
 
     private fun cachePut(

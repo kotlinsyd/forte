@@ -27,20 +27,25 @@ class ForteApp : Application(), ImageLoaderFactory {
 
     /** Bounded image caches (memory discipline): artwork is downsampled
      * by Coil to the view size anyway; these caps stop the caches from
-     * growing without limit on long sessions. */
+     * growing without limit on long sessions. The disk cap rose to
+     * 256 MB (v1.0.24-test, the poster-speed fix): at 64 MB a heavy
+     * listener's shelves evicted each other between sessions, so
+     * posters re-downloaded — and arrived late — on every cold open.
+     * A short crossfade keeps a landed poster from popping. */
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizePercent(0.15)
+                    .maxSizePercent(0.25)
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(64L * 1024 * 1024)
+                    .maxSizeBytes(256L * 1024 * 1024)
                     .build()
             }
+            .crossfade(180)
             .respectCacheHeaders(false)
             .build()
 
@@ -84,6 +89,9 @@ class ForteApp : Application(), ImageLoaderFactory {
         CrashReports.initIfEnabled(this, settings)
         player = PlayerController(this, library, settings)
         player.ensureService = { PlayerService.start(this) }
+        // Playback failures surface outside the player too
+        // (v1.0.24-test): the same toast the rest of the app uses.
+        player.onUserMessage = { showMessage(it) }
         downloads = DownloadManager(this, library, settings)
         // Session memory: bring back the queue exactly where he left
         // it — paused, stream resolving lazily on first play.
@@ -91,9 +99,15 @@ class ForteApp : Application(), ImageLoaderFactory {
         refreshYtLiked()
         // Artwork backfill: rows saved with no picture (old history,
         // radio plays) resolve their real posters once, in the
-        // background — never on the first-paint path.
+        // background — never on the first-paint path. The upgrade
+        // pass after it does the same for rows whose only picture
+        // is a video frame: the resolved album cover is written
+        // into the tables, so Listen again paints the FINAL poster
+        // at first paint instead of swapping frame → cover a
+        // moment later (v1.0.24-test).
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching { library.backfillArtwork() }
+            runCatching { library.upgradeHistoryArtwork() }
         }
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {

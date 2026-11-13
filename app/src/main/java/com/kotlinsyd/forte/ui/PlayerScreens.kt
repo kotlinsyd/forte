@@ -1,7 +1,10 @@
 package com.kotlinsyd.forte.ui
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
@@ -10,21 +13,26 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -48,7 +56,9 @@ import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Pause
@@ -77,13 +87,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
@@ -91,7 +106,10 @@ import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -108,8 +126,10 @@ import com.kotlinsyd.forte.data.YtAccount
 import com.kotlinsyd.forte.data.formatDuration
 import com.kotlinsyd.forte.playback.PlaybackState
 import com.kotlinsyd.forte.playback.RepeatMode
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 @Composable
 fun PlayerScreen(
@@ -216,21 +236,16 @@ fun PlayerScreen(
     // iTunes net supplies the real album cover (see ArtworkResolver).
     val heroUrl = rememberEnrichedArtwork(track)
 
-    // Artwork-derived colour: the cover's own
-    // dominant colour, darkened into the Onyx background — the sharp
-    // artwork stays the hero. Since v1.0.21-test the same small
-    // decode also feeds the page's blurred poster backdrop (see
-    // posterBitmap below and the backdrop box further down).
+    // Artwork-derived colour: the cover's own dominant colour,
+    // darkened into the Onyx background. It carries the page
+    // while the sharp full-screen artwork (Sample B) loads and
+    // feeds the app-wide ambience tint.
     val context = LocalContext.current
     var artColor by remember(track.id) { mutableStateOf(ForteColors.Bg) }
-    // The current song's poster as a bitmap for the blurred
-    // backdrop: a private copy of the palette load's small decode
-    // (the cached original belongs to Coil — the palette block's
-    // own caution applies). Null while loading or when the track
-    // has no artwork; the colour wash is the fallback then.
-    var posterBitmap by remember(track.id) {
-        mutableStateOf<android.graphics.Bitmap?>(null)
-    }
+    // (v1.0.28-test: the poster is full-bleed again — cover-fit
+    // fills any screen — so its aspect no longer drives any
+    // layout and is not tracked here; the palette load below
+    // only reads the colour now.)
     LaunchedEffect(track.id, heroUrl) {
         val url = heroUrl
         if (!url.isNullOrBlank()) {
@@ -246,14 +261,6 @@ fun PlayerScreen(
                 if (result is SuccessResult) {
                     val bitmap = (result.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
                     if (bitmap != null) {
-                        // Backdrop copy first (v1.0.21-test): the
-                        // poster backdrop draws this private copy,
-                        // never Coil's cached bitmap.
-                        posterBitmap = runCatching {
-                            bitmap.copy(
-                                android.graphics.Bitmap.Config.ARGB_8888, false
-                            )
-                        }.getOrNull()
                         // Palette runs off the main thread, on a private
                         // copy: the cached bitmap belongs to Coil and
                         // must never be read while it can be recycled.
@@ -284,214 +291,393 @@ fun PlayerScreen(
             }
         }
     }
-    val playerBg by animateColorAsState(
-        artColor,
-        animationSpec = if (forteSettings.reduceAnimation) {
-            androidx.compose.animation.core.snap()
-        } else {
-            tween(600)
-        },
-        label = "playerBg",
-    )
+    // (No animated palette wash behind the page: artColor
+    // still feeds the app-wide ambience tint published
+    // above; the page itself is the full-bleed poster under
+    // the frost sheet, v1.0.28-test.)
     // The player's own recorded backdrop (v1.0.21-test): the page
-    // records its background into this state and the controls'
-    // live glass blurs it behind themselves — the same machinery
-    // the Home stage uses for the dock (ForteRoot), wired for the
-    // player page. Blur values: the glass samples at the dock's
-    // 25dp; the poster's own blur is a much stronger 48dp.
+    // records its background into this state and the glass sheet
+    // + control discs blur it behind themselves — the same
+    // machinery the Home stage uses for the dock (ForteRoot),
+    // wired for the player page. The glass blur is Plavio's own
+    // 22dp since the v1.0.23-test pure-frost change.
     val playerBackdrop = rememberBackdropState()
-    val capsuleBlurPx = with(LocalDensity.current) { 25.dp.toPx() }
-    val posterBlurPx = with(LocalDensity.current) { 48.dp.toPx() }
-    val poster = posterBitmap
-    val posterAlpha by animateFloatAsState(
-        targetValue = if (poster != null) 1f else 0f,
-        animationSpec = if (forteSettings.reduceAnimation) {
-            androidx.compose.animation.core.snap()
-        } else {
-            tween(600)
-        },
-        label = "posterBackdrop",
-    )
-    Box(Modifier.fillMaxSize()) {
-        // Backdrop (v1.0.21-test, owner's order: "add posters
-        // backdrop to blur"). The current song's poster — decoded
-        // small by the palette load (96×96) — drawn full-bleed
-        // behind everything, strongly blurred. The box is what
-        // the page records into [playerBackdrop]; the controls
-        // above blur it live behind their glass. When the track
-        // has no artwork (or it hasn't landed yet), the v1.0.14
-        // colour wash alone carries the page, exactly as before.
+    val capsuleBlurPx = with(LocalDensity.current) { 22.dp.toPx() }
+    // Sleep timer state, visible while armed (as before) —
+    // hoisted above the layout in v1.0.28-test: the frost
+    // sheet's height makes room for the label (and for the
+    // error pill) when either is showing, so both are known
+    // before the sheet is measured.
+    var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(state.sleepEndsAtMs) {
+        while (state.sleepEndsAtMs > 0) {
+            nowTick = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
+    val sleepLabel = when {
+        state.sleepAtTrackEnd -> "Sleep: stops at the end of this song"
+        state.sleepEndsAtMs > nowTick ->
+            "Sleep in " + formatDuration((state.sleepEndsAtMs - nowTick) / 1000)
+        else -> null
+    }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .then(headerDrag)
+            .nestedScroll(sheetScroll),
+    ) {
+      BoxWithConstraints(Modifier.fillMaxSize()) {
+        // OWNER-LOCKED LAYOUT (v1.0.28-test, Design 2):
+        // Sample B with the owner's own modification — his
+        // words on his v1.0.23-test player screenshot: "Do
+        // this but make button down, and smaller this card
+        // to down, so poster can show." The FULL-BLEED
+        // poster is the page background again (cover-fit,
+        // edge to edge), and Sample B's frost sheet —
+        // 36dp rounded top corners, drag handle — returns
+        // SMALLER AND LOWER: its top edge sits at ~64% of
+        // the screen height, so the poster shows over
+        // roughly the top two-thirds. The sheet is
+        // bottom-anchored and its frost is the player's
+        // live capsule glass over the recorded poster
+        // (blurred poster, Plavio's 0.50 tint, the dim
+        // silver outline — the arrangement fixed in
+        // v1.0.25-test). Inside the sheet the deck rides
+        // LOW: a flexible spacer under the handle pools
+        // the slack, so the buttons land at the same place
+        // for every song (the .26 constant-position rule,
+        // kept), with tight spacing — gaps were trimmed
+        // before any control size was touched. The sheet
+        // grows upward a little while the sleep label or
+        // the error pill is showing, so nothing ever
+        // clips. The whole surface is still the sheet's
+        // drag handle — sliding down anywhere minimizes
+        // to the mini-player. (Supersedes the .25/.26
+        // centred-poster layout and the un-built
+        // full-bleed-no-card sample.)
+        //
+        // v1.0.29-test — THE SHEET MOVES (owner, on his
+        // .28 phone test: "Liked it, it should be movable,
+        // at default its should be same like this, but
+        // swipe up show more options like what need for a
+        // music player"). The resting layout above is
+        // untouched: the sheet ALSO drags up to ~82% of
+        // the screen (its drag state is [deckSheet] below;
+        // tapping the handle toggles), the poster stays
+        // full-bleed behind it, and the deck stays
+        // anchored at the sheet's bottom in both states.
+        // An expanded-only panel — thumbs Like it /
+        // Don't like and the quick actions — reveals
+        // above the actions row as the sheet grows. One
+        // discipline survives from before: a downward
+        // drag AT REST is never claimed by the sheet's
+        // own drag, so it still minimizes the player
+        // exactly as it always did.
+        //
+        // v1.0.30-test — the owner's two verdicts on .29:
+        // (1) in the expanded state the actions row sat at
+        // the physical screen edge, half-clipped — heights
+        // are now computed against the inset-adjusted
+        // screen and the nav inset rides inside the sheet
+        // as bottom padding (both states), with the panel
+        // capped so it absorbs any overflow, never the
+        // deck; (2) the swipe animation was "not smooth at
+        // all" — the fraction is now consumed ONLY in
+        // layout/draw phases (sheet + panel heights are
+        // layout lambdas, the panel is pre-composed, the
+        // poster's backdrop recordings freeze for the
+        // gesture), so a drag frame costs a measure of
+        // this subtree plus texture draws, never a
+        // recomposition of the screen.
+        val sheetShape = RoundedCornerShape(topStart = 36.dp, topEnd = 36.dp)
+        val sheetExtra =
+            (if (state.error != null) 50.dp else 0.dp) +
+                (if (sleepLabel != null) 28.dp else 0.dp)
+        // v1.0.30-test (owner's expanded-state screenshot:
+        // the Like / Up Next / Share row sat at the very
+        // screen edge, half-clipped): the sheet's heights
+        // are now computed against the INSET-ADJUSTED screen
+        // — the area above the system navigation bar — and
+        // the nav inset itself is carried as bottom padding
+        // inside the sheet (see the Column below), in BOTH
+        // resting states. The deck's seat relative to the
+        // usable screen is unchanged; the sheet simply stops
+        // pretending the nav-bar strip is usable height.
+        val density = LocalDensity.current
+        val navInsetBottom = with(density) {
+            WindowInsets.navigationBars.getBottom(density).toDp()
+        }
+        val usableHeight = maxHeight - navInsetBottom
+        val defaultSheetHeight =
+            maxOf(usableHeight * 0.36f, 300.dp) + sheetExtra + navInsetBottom
+        val expandedSheetHeight =
+            maxOf(usableHeight * 0.82f + navInsetBottom, defaultSheetHeight)
+        // Per-track sheet state: a new song always meets
+        // the sheet at rest (fraction 0).
+        val deckSheet = remember(track.id) { PlayerDeckSheetState(scope) }
+        // While the deck drags or settles, the player's
+        // backdrop recordings freeze (v1.0.30-test): the
+        // recorded poster can't change mid-gesture, and the
+        // re-record/re-blur per drag frame was frame cost
+        // for nothing. The last recording keeps serving.
+        LaunchedEffect(deckSheet) {
+            snapshotFlow { deckSheet.motionActive }.collect { active ->
+                playerBackdrop.frozen = active
+            }
+        }
+        // The expanded panel's height cap (v1.0.30-test):
+        // the deck's fixed content — everything in the sheet
+        // except the weight spacer and the panel itself —
+        // measured at its WORST combination (2-line title,
+        // stream-info line on, sleep label AND error pill
+        // showing), summed from the layout constants below
+        // (line heights ≈ 1.25em): handle zone 18 + eyebrow
+        // 14 + gap 4 + title block 82 + stream info 18 +
+        // gap 10 + seek 28 + times 15 + gap 8 + transport 68
+        // + gap 10 + divider 1 + gap 6 + actions row 37 +
+        // sleep 21 + error 44 = 384dp. Whatever of the
+        // expanded sheet the deck doesn't need, the panel
+        // may use — and if the deck needs MORE than the
+        // expanded sheet leaves, the PANEL absorbs the
+        // difference (it compresses/clips first), never the
+        // deck: on a small screen the panel lands short of
+        // its full 122dp and the Like / Up Next / Share row
+        // still sits whole above the nav inset.
+        val deckFixedWorst = 384.dp
+        val panelCapHeight = (
+            expandedSheetHeight - navInsetBottom - 16.dp - deckFixedWorst
+            ).coerceAtLeast(0.dp)
+        val sheetRangePx = with(LocalDensity.current) {
+            (expandedSheetHeight - defaultSheetHeight).toPx()
+        }
+        val sheetRangePxState = rememberUpdatedState(sheetRangePx)
+        // The recorded page: the full-bleed poster over
+        // the artwork gradient, with a light veil that
+        // deepens toward the sheet. The sheet and the top
+        // discs are drawn after it, outside the recorded
+        // subtree, and sample it through the player
+        // backdrop — the same wiring the discs already use.
         Box(
             Modifier
                 .fillMaxSize()
+                .background(ForteColors.Bg)
                 .recordBackdrop(playerBackdrop),
         ) {
-            // Ambience (v1.0.14): the cover's palette colour
-            // washes the top of the page and deepens into the
-            // background colour.
             Box(
                 Modifier
                     .fillMaxSize()
                     .background(
-                        Brush.verticalGradient(
-                            listOf(
-                                playerBg,
-                                lerp(playerBg, ForteColors.Bg, 0.45f),
-                                ForteColors.Bg,
-                            ),
-                        )
+                        Brush.linearGradient(artworkGradient(track.title)),
                     ),
             )
-            if (poster != null) {
-                Image(
-                    bitmap = poster.asImageBitmap(),
+            if (!heroUrl.isNullOrBlank()) {
+                coil.compose.AsyncImage(
+                    // The player keeps the largest form
+                    // (the HERO rung of the ladder —
+                    // w1080 / 1200bb), with the artwork
+                    // gradient standing in while it loads
+                    // or if it fails.
+                    model = com.kotlinsyd.forte.data.artworkAt(
+                        heroUrl,
+                        com.kotlinsyd.forte.data.ArtSize.HERO,
+                    ),
+                    placeholder = rememberArtworkPainter(track.title),
+                    error = rememberArtworkPainter(track.title),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            alpha = posterAlpha
-                            // Scaled past the edges so the blur's
-                            // falloff never shows a rim.
-                            scaleX = 1.18f
-                            scaleY = 1.18f
-                            if (backdropBlurSupported) {
-                                renderEffect = BlurEffect(
-                                    posterBlurPx, posterBlurPx,
-                                    TileMode.Clamp,
-                                )
-                            }
-                        },
+                    modifier = Modifier.fillMaxSize(),
                 )
             }
-        }
-        // Readability tint over the poster — deliberately NOT
-        // recorded: the controls' glass samples the poster
-        // itself (the way the dock samples the untinted page),
-        // while text and artwork sit on this tint and stay
-        // perfectly readable over bright covers.
-        if (poster != null) {
             Box(
                 Modifier
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
-                            listOf(
-                                ForteColors.Bg.copy(alpha = 0.34f),
-                                ForteColors.Bg.copy(alpha = 0.58f),
-                                ForteColors.Bg.copy(alpha = 0.88f),
-                            ),
-                        )
+                            0f to Color.Transparent,
+                            0.55f to Color.Transparent,
+                            0.78f to ForteColors.Bg.copy(alpha = 0.38f),
+                            1f to ForteColors.Bg.copy(alpha = 0.55f),
+                        ),
                     ),
             )
         }
+        // The frost sheet, bottom-anchored. Its own
+        // vertical drag (v1.0.29-test) grows/shrinks it
+        // between the two resting heights; the detector is
+        // hand-rolled (not detectVerticalDragGestures) so
+        // consumption stays under this sheet's control:
+        // a change is consumed only once the drag is
+        // claimed — an upward pull, or any pull while the
+        // sheet stands part-way up. A downward drag at
+        // rest is left unconsumed on purpose and falls
+        // through to the player sheet's header drag,
+        // which minimizes to the mini-player as before.
+        Box(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                // The sheet's height is read from the drag
+                // fraction HERE, in the layout phase only
+                // (v1.0.30-test): v1.0.29-test read it during
+                // composition, so every drag frame recomposed
+                // the whole player screen — artwork, palette
+                // state, the lot — and then re-laid-out anyway.
+                // Now a fraction change re-measures this
+                // sheet's subtree and redraws; the screen
+                // never recomposes for motion, and the glass
+                // behind the sheet is a fixed recorded texture
+                // whose clip window simply grows (the backdrop
+                // recordings are also frozen for the gesture —
+                // see BackdropState.frozen).
+                .layout { measurable, constraints ->
+                    val targetHeight = defaultSheetHeight +
+                        (expandedSheetHeight - defaultSheetHeight) *
+                        deckSheet.fraction
+                    val hPx = targetHeight.roundToPx()
+                    val placeable = measurable.measure(
+                        constraints.copy(minHeight = hPx, maxHeight = hPx),
+                    )
+                    layout(placeable.width, placeable.height) {
+                        placeable.placeRelative(0, 0)
+                    }
+                }
+                .liveCapsuleGlass(playerBackdrop, sheetShape, capsuleBlurPx)
+                .pointerInput(track.id) {
+                    val velocityTracker = VelocityTracker()
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        velocityTracker.resetTracking()
+                        velocityTracker.addPosition(
+                            down.uptimeMillis, down.position,
+                        )
+                        var claimed = false
+                        var undecidedDy = 0f
+                        var lastY = down.position.y
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes
+                                .firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            val dy = change.position.y - lastY
+                            lastY = change.position.y
+                            if (!claimed) {
+                                undecidedDy += dy
+                                if (abs(undecidedDy) > viewConfiguration.touchSlop) {
+                                    claimed = deckSheet.fraction > 0f ||
+                                        undecidedDy < 0f
+                                    if (claimed) {
+                                        // The whole travel so
+                                        // far counts — no dead
+                                        // zone past the slop.
+                                        deckSheet.dragBy(
+                                            undecidedDy,
+                                            sheetRangePxState.value,
+                                        )
+                                        change.consume()
+                                        velocityTracker.addPosition(
+                                            change.uptimeMillis, change.position,
+                                        )
+                                    }
+                                }
+                            } else {
+                                change.consume()
+                                velocityTracker.addPosition(
+                                    change.uptimeMillis, change.position,
+                                )
+                                deckSheet.dragBy(dy, sheetRangePxState.value)
+                            }
+                        }
+                        if (claimed) {
+                            deckSheet.settle(velocityTracker.calculateVelocity().y)
+                        }
+                    }
+                },
+        ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .then(headerDrag)
-                .nestedScroll(sheetScroll)
-                .padding(horizontal = 24.dp),
+                .padding(horizontal = 24.dp)
+                // The nav inset as bottom padding inside the
+                // sheet, both states (v1.0.30-test): the deck's
+                // last row always lands above the system bar,
+                // never under it or clipped by the screen edge.
+                .padding(bottom = 16.dp + navInsetBottom),
         ) {
-            // Fixed deck (v1.0.14): the whole player surface is the
-            // sheet's drag handle — sliding down anywhere minimizes
-            // to the mini-player, the finger followed the whole way.
-            // Nothing in the deck scrolls: artwork, title, progress,
-            // transport and actions are one fixed screen.
-            // Sheet drag handle.
+            // The sheet's drag handle (Sample B). Tapping
+            // it toggles the sheet between its two resting
+            // heights (v1.0.29-test); dragging it — or
+            // anywhere on the sheet — moves it by finger.
             Box(
-                modifier = Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .padding(top = 10.dp)
-                    .size(width = 38.dp, height = 4.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(Color.White.copy(alpha = 0.28f)),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onCollapse) {
-                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Minimize player", tint = Color.White)
-                }
-                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        if (forteSettings.hideSongStatus) {
-                            "NOW PLAYING"
-                        } else if (state.radio) {
-                            "PLAYING FROM RADIO"
-                        } else {
-                            "PLAYING FROM " + (state.origin ?: "QUEUE").uppercase()
-                        },
-                        fontSize = 11.sp, fontWeight = FontWeight.Bold, color = ForteColors.TextDim, letterSpacing = 2.sp,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        track.artist, fontSize = 13.sp, color = Color.White,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                TrackMenu(track, actions, isFavorite)
-            }
-            Spacer(Modifier.height(12.dp))
-            androidx.compose.foundation.layout.BoxWithConstraints(
-                modifier = Modifier.fillMaxWidth().weight(1f),
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { deckSheet.toggle() }
+                    .padding(top = 9.dp, bottom = 5.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                // Fit fix (v1.0.16): the cover box is the deck's one
-                // flexible element — it takes whatever height the
-                // fixed rows (header, title, progress, transport,
-                // chips, output pill) leave on THIS screen, and the
-                // artwork is capped by that height as well as the
-                // width. A width-only 360dp cover outgrew shorter
-                // phones and pushed the output pill off the bottom
-                // edge (owner's photo). Full-screen cover mode: the
-                // artwork runs to the physical left and right edges
-                // (the page's own 24.dp padding is added back),
-                // sharp and square — still height-capped, so the
-                // deck always fits. Off, the cover is the page
-                // width capped at 360dp (v1.0.14).
-                val widthCap = if (forteSettings.fullScreenCover) {
-                    maxWidth + 48.dp
-                } else {
-                    minOf(maxWidth, 360.dp)
-                }
-                val coverSize = minOf(widthCap, maxHeight)
-                Artwork(
-                    heroUrl, track.title, coverSize,
-                    corner = if (forteSettings.fullScreenCover) 0.dp else 20.dp,
+                Box(
+                    Modifier
+                        .size(width = 36.dp, height = 4.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.White.copy(alpha = 0.28f)),
                 )
             }
-
-            Spacer(Modifier.height(16.dp))
-            // Title block: favorite and dislike live in the action
-            // chip row below the transport now (v1.0.14) — the title
-            // row itself only opens Credits, as before.
+            // The deck rides LOW (owner: "make button
+            // down"): the slack pools here, under the
+            // handle — the buttons never wander with the
+            // title's length or the poster's shape.
+            Spacer(Modifier.weight(1f))
+            // Eyebrow: the old header's status line, unchanged.
+            Text(
+                if (forteSettings.hideSongStatus) {
+                    "NOW PLAYING"
+                } else if (state.radio) {
+                    "PLAYING FROM RADIO"
+                } else {
+                    "PLAYING FROM " + (state.origin ?: "QUEUE").uppercase()
+                },
+                fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                color = ForteColors.TextDim, letterSpacing = 2.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(4.dp))
+            // Title block (tap opens Credits, as before).
             Column(
                 Modifier
                     .fillMaxWidth()
                     .clickable { showCredits = true },
             ) {
                 Text(
-                    track.title, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold,
-                    color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    // Two lines now (v1.0.24-test, fitted
+                    // titles): a long song title wraps onto a
+                    // second line and trims with an ellipsis
+                    // instead of being cut at one line.
+                    track.title, fontSize = 25.sp, fontWeight = FontWeight.ExtraBold,
+                    color = Color.White, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     track.artist, fontSize = 16.sp, color = ForteColors.TextDim,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
+            // What is actually streaming (codec · bitrate), or
+            // the saved-file note for downloads — the Settings
+            // "Stream info line" row owns whether this shows.
+            if (forteSettings.streamInfoLine) {
+                state.streamInfo?.let { info ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(info, fontSize = 11.sp, color = ForteColors.TextDim)
+                }
+            }
 
-            // Progress (v1.0.14): a thin 3dp line with a thumb that
-            // exists only while scrubbing — tap or drag to seek.
-            // The shown position is clamped into the range first:
-            // while a stream loads, position and duration can
-            // disagree, and the bar must never throw over it.
-            // Playback speed lives in the more-sheet now.
+            // Seek — the old deck's plumbing unchanged; the
+            // times row now shows the total on the right, as
+            // Sample B does (it showed "-remaining" before).
             var scrubbing by remember { mutableStateOf<Float?>(null) }
             val duration = state.durationMs.coerceAtLeast(1)
             val shownPos = (scrubbing?.let { (it * duration).toLong() } ?: state.positionMs)
                 .coerceIn(0L, duration)
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(10.dp))
             ForteProgressBar(
                 fraction = (shownPos.toFloat() / duration).coerceIn(0f, 1f),
                 scrubbing = scrubbing != null,
@@ -505,105 +691,55 @@ fun PlayerScreen(
                 Text(formatDuration(shownPos / 1000), fontSize = 12.sp, color = ForteColors.TextDim)
                 Spacer(Modifier.weight(1f))
                 Text(
-                    "-" + formatDuration(((duration - shownPos).coerceAtLeast(0)) / 1000),
+                    formatDuration(duration / 1000),
                     fontSize = 12.sp, color = ForteColors.TextDim,
                 )
             }
-            // What is actually streaming (codec · bitrate), or the
-            // saved-file note for downloads. The Settings row
-            // "Stream info line" owns whether this shows at all.
-            if (forteSettings.streamInfoLine) {
-                state.streamInfo?.let { info ->
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        info, fontSize = 11.sp, color = ForteColors.TextDim,
-                        modifier = Modifier.align(Alignment.CenterHorizontally),
-                    )
-                }
-            }
+            Spacer(Modifier.height(8.dp))
 
-            // No flexible spacer here since v1.0.16: the cover box
-            // above carries the deck's weight(1f) and absorbs the
-            // slack, so the rows below always start right under the
-            // stream-info line and end flush at the bottom inset.
-            // Transport row (v1.0.19-test, owner's Sample B pick):
-            // every button is its OWN oval pill — only play/pause
-            // stays a round disc, centred. v1.0.21-test: the
-            // pills' glass is LIVE (the page's recorded poster
-            // backdrop, the dock's construction and blur), and
-            // red survives as the press ring only — a true-red
-            // outline on whichever button is being touched (see
-            // trueRedPressRing); the v1.0.20-test red pause glyph
-            // is gone on the owner's word.
-            val ovalShape = RoundedCornerShape(50)
-            val shufflePress = remember { MutableInteractionSource() }
-            val shufflePressed by shufflePress.collectIsPressedAsState()
-            val previousPress = remember { MutableInteractionSource() }
-            val previousPressed by previousPress.collectIsPressedAsState()
+            // Transport (Sample B): plain glyphs on the glass —
+            // shuffle · prev · big play · next · repeat. The
+            // play control is a solid WHITE disc with a dark
+            // glyph; shuffle/repeat state still reads in the red
+            // tint; the true-red press ring survives on the play
+            // disc (the owner's red-on-touch rule).
             val pausePress = remember { MutableInteractionSource() }
             val pausePressed by pausePress.collectIsPressedAsState()
-            val nextPress = remember { MutableInteractionSource() }
-            val nextPressed by nextPress.collectIsPressedAsState()
-            val repeatPress = remember { MutableInteractionSource() }
-            val repeatPressed by repeatPress.collectIsPressedAsState()
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(
-                        modifier = Modifier
-                            .width(54.dp)
-                            .height(44.dp)
-                            .clip(ovalShape)
-                            .liveCapsuleGlass(playerBackdrop, ovalShape, capsuleBlurPx)
-                            .trueRedPressRing(ovalShape, shufflePressed)
-                            .clickable(interactionSource = shufflePress, indication = LocalIndication.current) {
-                                controller.setShuffle(!state.shuffle)
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            Icons.Filled.Shuffle, contentDescription = "Shuffle",
-                            tint = if (state.shuffle) ForteColors.Red else Color.White.copy(alpha = 0.8f),
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                    if (state.shuffle) {
-                        Box(Modifier.size(4.dp).clip(CircleShape).background(ForteColors.Red))
-                    }
-                }
                 Box(
                     modifier = Modifier
-                        .width(60.dp)
-                        .height(48.dp)
-                        .clip(ovalShape)
-                        .liveCapsuleGlass(playerBackdrop, ovalShape, capsuleBlurPx)
-                        .trueRedPressRing(ovalShape, previousPressed)
-                        .clickable(interactionSource = previousPress, indication = LocalIndication.current) { controller.previous() },
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .clickable { controller.setShuffle(!state.shuffle) },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.Filled.SkipPrevious, contentDescription = "Previous", tint = Color.White, modifier = Modifier.size(30.dp))
+                    Icon(
+                        Icons.Filled.Shuffle, contentDescription = "Shuffle",
+                        tint = if (state.shuffle) ForteColors.Red else Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(21.dp),
+                    )
                 }
-                // Play/pause (v1.0.14): a 64dp glass circle.
-                // v1.0.18: the glass is the polished frosted dark
-                // material, like every other player control.
-                // v1.0.19-test tried a 12% red wash under the
-                // glass; the owner rejected it ("not true red").
-                // v1.0.20-test replaced the wash with the glyph
-                // itself in solid TRUE red. v1.0.21-test: the
-                // owner rejected that too ("it looks bad") — the
-                // glyph and the buffering ring are WHITE again,
-                // like every other control and the mini-player's
-                // disc, and the glass is the LIVE capsule glass
-                // over the poster backdrop. The disc's only red
-                // now is the press ring while a finger is on it.
                 Box(
                     modifier = Modifier
-                        .size(64.dp)
+                        .size(56.dp)
                         .clip(CircleShape)
-                        .liveCapsuleGlass(playerBackdrop, CircleShape, capsuleBlurPx)
+                        .clickable { controller.previous() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.SkipPrevious, contentDescription = "Previous",
+                        tint = Color.White, modifier = Modifier.size(32.dp),
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(68.dp)
+                        .clip(CircleShape)
+                        .background(Color.White, CircleShape)
                         .trueRedPressRing(CircleShape, pausePressed)
                         .clickable(interactionSource = pausePress, indication = LocalIndication.current) {
                             controller.togglePlayPause()
@@ -611,197 +747,287 @@ fun PlayerScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     if (state.buffering) {
-                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(34.dp))
+                        CircularProgressIndicator(
+                            color = ForteColors.Bg, modifier = Modifier.size(32.dp),
+                        )
                     } else {
                         Icon(
                             if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                             contentDescription = if (state.playing) "Pause" else "Play",
-                            tint = Color.White, modifier = Modifier.size(34.dp),
+                            tint = ForteColors.Bg, modifier = Modifier.size(34.dp),
                         )
                     }
                 }
                 Box(
                     modifier = Modifier
-                        .width(60.dp)
-                        .height(48.dp)
-                        .clip(ovalShape)
-                        .liveCapsuleGlass(playerBackdrop, ovalShape, capsuleBlurPx)
-                        .trueRedPressRing(ovalShape, nextPressed)
-                        .clickable(interactionSource = nextPress, indication = LocalIndication.current) {
-                            controller.next(manual = true)
-                        },
+                        .size(56.dp)
+                        .clip(CircleShape)
+                        .clickable { controller.next(manual = true) },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.Filled.SkipNext, contentDescription = "Next", tint = Color.White, modifier = Modifier.size(30.dp))
+                    Icon(
+                        Icons.Filled.SkipNext, contentDescription = "Next",
+                        tint = Color.White, modifier = Modifier.size(32.dp),
+                    )
                 }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(
-                        modifier = Modifier
-                            .width(54.dp)
-                            .height(44.dp)
-                            .clip(ovalShape)
-                            .liveCapsuleGlass(playerBackdrop, ovalShape, capsuleBlurPx)
-                            .trueRedPressRing(ovalShape, repeatPressed)
-                            .clickable(interactionSource = repeatPress, indication = LocalIndication.current) {
-                                controller.cycleRepeat()
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            if (state.repeat == RepeatMode.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
-                            contentDescription = "Repeat",
-                            tint = if (state.repeat != RepeatMode.OFF) ForteColors.Red else Color.White.copy(alpha = 0.8f),
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                    if (state.repeat != RepeatMode.OFF) {
-                        Box(Modifier.size(4.dp).clip(CircleShape).background(ForteColors.Red))
-                    }
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .clickable { controller.cycleRepeat() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        if (state.repeat == RepeatMode.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
+                        contentDescription = "Repeat",
+                        tint = if (state.repeat != RepeatMode.OFF) ForteColors.Red else Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(21.dp),
+                    )
                 }
             }
+            Spacer(Modifier.height(10.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(Color.White.copy(alpha = 0.08f)),
+            )
+            Spacer(Modifier.height(6.dp))
 
-            // One row of glass icon chips. v1.0.18 (owner's order):
-            // the row is now queue, THUMB UP, download, THUMB DOWN
-            // and the overflow sheet. Thumb up likes the song (the
-            // same favorites store + YouTube two-way sync the heart
-            // used — the heart itself still lives in the song menu)
-            // and leans the queue toward similar songs; thumb down
-            // dislikes AND changes the song (see toggleDislike).
-            // The sheet carries sleep, EQ, speed, quality, share,
-            // add-to-playlist, credits, radio and lyrics.
-            // v1.0.19-test (Sample B): each chip is its own oval
-            // pill like the transport row; a LIKED thumb up fills
-            // with solid TRUE red (v1.0.20-test) — the row's one
-            // red point — while unliked it stays white on dark glass.
-            // v1.0.21-test: the chips' glass is the LIVE capsule
-            // glass over the poster backdrop, and every chip wears
-            // the true-red press ring while touched.
-            Spacer(Modifier.height(16.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
+            // The EXPANDED PANEL (v1.0.29-test): exists
+            // only while the sheet stands grown — its
+            // height and alpha ride the sheet's fraction,
+            // so it fades/slides in as the sheet rises and
+            // is fully gone at rest. No duplicates of the
+            // face: the thumbs row is the verdict pair (the
+            // up-thumb is the SAME like as the heart below,
+            // one store, both read it; the down-thumb is
+            // the dislike the more-sheet carries), and the
+            // quick row wires three features that already
+            // exist — add to playlist, the offline
+            // download, the sleep timer — to their own
+            // flows.
+            //
+            // v1.0.30-test: the panel is ALWAYS composed
+            // (v1.0.29-test composed/uncomposed it at the
+            // 0.01 threshold — a composition hitch mid-drag)
+            // and its height is read from the fraction in
+            // the LAYOUT phase, like the sheet's own height:
+            // 122dp at full growth (116 of rows + the 6dp
+            // gap below, now the panel's own last element),
+            // 0 at rest — and capped at [panelCapHeight], so
+            // on a screen too small for deck + full panel,
+            // the panel compresses and the deck never does.
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .layout { measurable, constraints ->
+                        val target = minOf(
+                            ExpandedPanelFullHeight * deckSheet.fraction,
+                            panelCapHeight,
+                        )
+                        val hPx = target.roundToPx().coerceAtLeast(0)
+                        val placeable = measurable.measure(
+                            constraints.copy(minHeight = hPx, maxHeight = hPx),
+                        )
+                        layout(placeable.width, placeable.height) {
+                            placeable.placeRelative(0, 0)
+                        }
+                    }
+                    .clipToBounds()
+                    .graphicsLayer { alpha = deckSheet.fraction },
             ) {
-                PlayerChip(
-                    onClick = onOpenQueue,
-                    backdrop = playerBackdrop, glassBlurPx = capsuleBlurPx,
-                ) {
-                    Icon(
-                        Icons.Filled.QueueMusic, contentDescription = "Queue",
-                        tint = Color.White, modifier = Modifier.size(22.dp),
-                    )
-                }
-                PlayerChip(
-                    onClick = {
-                        if (!isFavorite) actions.toggleFavorite(track)
-                        controller.leanIntoSimilar(track)
-                    },
-                    filledRed = isFavorite,
-                    backdrop = playerBackdrop, glassBlurPx = capsuleBlurPx,
-                ) {
-                    Icon(
-                        Icons.Filled.ThumbUp,
-                        contentDescription = "Like — play more like this",
-                        tint = Color.White,
-                        modifier = Modifier.size(22.dp),
-                    )
-                }
-                PlayerChip(
-                    onClick = { if (!isDownloaded && dlProgress == null) actions.download(track) },
-                    backdrop = playerBackdrop, glassBlurPx = capsuleBlurPx,
-                ) {
-                    when {
-                        dlProgress != null && dlProgress.error == null -> {
-                            CircularProgressIndicator(
-                                color = Color.White, strokeWidth = 2.dp,
-                                modifier = Modifier.size(20.dp),
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color.White.copy(alpha = 0.06f))
+                                .clickable {
+                                    if (isFavorite) {
+                                        actions.toggleFavorite(track)
+                                    } else {
+                                        actions.toggleFavorite(track)
+                                        controller.leanIntoSimilar(track)
+                                    }
+                                }
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Filled.ThumbUp,
+                                contentDescription = "Like it",
+                                tint = if (isFavorite) ForteColors.Red else Color.White,
+                                modifier = Modifier.size(21.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Like it",
+                                fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                                color = if (isFavorite) ForteColors.Red else Color.White,
                             )
                         }
-                        else -> Icon(
-                            if (isDownloaded) Icons.Filled.Check else Icons.Filled.Download,
-                            contentDescription = "Download",
-                            tint = if (isDownloaded) ForteColors.Red else Color.White,
-                            modifier = Modifier.size(22.dp),
-                        )
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color.White.copy(alpha = 0.06f))
+                                .clickable {
+                                    val wasDisliked = isDisliked
+                                    toggleDislike()
+                                    if (!wasDisliked) {
+                                        app.showMessage(
+                                            "Got it — won't play this again",
+                                        )
+                                    }
+                                }
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Filled.ThumbDown,
+                                contentDescription = "Don't like",
+                                tint = if (isDisliked) ForteColors.TrueRed else Color.White,
+                                modifier = Modifier.size(21.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Don't like",
+                                fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                                color = if (isDisliked) ForteColors.TrueRed else Color.White,
+                            )
+                        }
                     }
-                }
-                PlayerChip(
-                    onClick = toggleDislike,
-                    backdrop = playerBackdrop, glassBlurPx = capsuleBlurPx,
-                ) {
-                    Icon(
-                        Icons.Filled.ThumbDown,
-                        contentDescription = if (isDisliked) "Remove dislike" else "Dislike — skip this song",
-                        tint = if (isDisliked) ForteColors.TrueRed else Color.White,
-                        modifier = Modifier.size(22.dp),
-                    )
-                }
-                PlayerChip(
-                    onClick = { showMoreSheet = true },
-                    backdrop = playerBackdrop, glassBlurPx = capsuleBlurPx,
-                ) {
-                    Icon(
-                        Icons.Filled.MoreVert, contentDescription = "More",
-                        tint = Color.White, modifier = Modifier.size(22.dp),
-                    )
-                }
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        PlayerQuickAction(
+                            icon = Icons.Filled.PlaylistAdd,
+                            label = "Add to playlist",
+                            tint = Color.White,
+                            modifier = Modifier.weight(1f),
+                        ) { actions.addToPlaylist(track) }
+                        PlayerQuickAction(
+                            icon = if (isDownloaded) Icons.Filled.Check else Icons.Filled.Download,
+                            label = if (isDownloaded) "Downloaded" else "Download",
+                            tint = if (isDownloaded) ForteColors.Red else Color.White,
+                            busy = dlProgress != null && dlProgress.error == null,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            if (!isDownloaded && dlProgress == null) {
+                                actions.download(track)
+                            }
+                        }
+                        PlayerQuickAction(
+                            icon = Icons.Filled.Timer,
+                            label = "Sleep timer",
+                            tint = if (state.sleepArmed) ForteColors.Red else Color.White,
+                            modifier = Modifier.weight(1f),
+                        ) { showSleepTimer = true }
+                    }
+                    // The 6dp gap under the panel (it was a
+                    // sibling spacer in v1.0.29-test; it rides
+                    // inside the panel's measured height now,
+                    // so a capped panel absorbs it too).
+                    Spacer(Modifier.height(6.dp))
             }
-            // The one output pill (v1.0.14): where the sound is
-            // going, centred under the controls; tapping it opens
-            // the output sheet.
-            Spacer(Modifier.height(14.dp))
-            val outputPress = remember { MutableInteractionSource() }
-            val outputPressed by outputPress.collectIsPressedAsState()
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .clip(ovalShape)
-                    .liveCapsuleGlass(playerBackdrop, ovalShape, capsuleBlurPx)
-                    .trueRedPressRing(ovalShape, outputPressed)
-                    .clickable(interactionSource = outputPress, indication = LocalIndication.current) { showOutput = true }
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
+
+            // Actions row (Sample B): Liked · Up Next · Share.
+            // Everything the old chip row also carried —
+            // download, dislike, audio output — lives in the
+            // more-sheet now; nothing was dropped.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable {
+                            if (isFavorite) {
+                                actions.toggleFavorite(track)
+                            } else {
+                                actions.toggleFavorite(track)
+                                controller.leanIntoSimilar(track)
+                            }
+                        }
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Icon(
-                        Icons.Filled.Speaker, contentDescription = "Audio output",
-                        tint = Color.White, modifier = Modifier.size(16.dp),
+                        if (isFavorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                        contentDescription = if (isFavorite) "Liked" else "Like",
+                        tint = if (isFavorite) ForteColors.Red else Color.White,
+                        modifier = Modifier.size(21.dp),
                     )
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(7.dp))
                     Text(
-                        state.outputName ?: "Automatic",
-                        fontSize = 13.sp, color = Color.White,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        if (isFavorite) "Liked" else "Like",
+                        fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        color = if (isFavorite) ForteColors.Red else Color.White,
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable { onOpenQueue() }
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Filled.QueueMusic, contentDescription = "Up next",
+                        tint = Color.White, modifier = Modifier.size(21.dp),
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        "Up Next", fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable { actions.share(track) }
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Filled.Share, contentDescription = "Share",
+                        tint = Color.White, modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        "Share", fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
                     )
                 }
             }
 
-            // Sleep timer state, visible while armed.
-            var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
-            LaunchedEffect(state.sleepEndsAtMs) {
-                while (state.sleepEndsAtMs > 0) {
-                    nowTick = System.currentTimeMillis()
-                    delay(1000)
-                }
-            }
-            val sleepLabel = when {
-                state.sleepAtTrackEnd -> "Sleep: stops at the end of this song"
-                state.sleepEndsAtMs > nowTick ->
-                    "Sleep in " + formatDuration((state.sleepEndsAtMs - nowTick) / 1000)
-                else -> null
-            }
+            // Sleep timer state, visible while armed (the
+            // label itself is computed above the layout —
+            // v1.0.28-test hoisted it so the sheet's height
+            // can make room for it there).
             if (sleepLabel != null) {
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(6.dp))
                 Text(
                     sleepLabel, fontSize = 12.sp, color = ForteColors.Red,
                     modifier = Modifier.align(Alignment.CenterHorizontally),
                 )
             }
 
-            // No lyrics card in the deck (v1.0.14): lyrics open
-            // full-screen from the more-sheet, as an overlay.
+            // No lyrics card in the deck: lyrics open from the
+            // more-sheet, as an overlay (unchanged).
 
             state.error?.let { err ->
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(8.dp))
                 Box(
                     Modifier
                         .fillMaxWidth()
@@ -812,14 +1038,61 @@ fun PlayerScreen(
                     Text(err, color = Color.White, fontSize = 13.sp)
                 }
             }
-            Spacer(Modifier.height(24.dp))
         }
+        }
+
+        // Top row: two frost discs over the poster's top
+        // corners — collapse (the sheet-drag does the same)
+        // and the more-sheet, which carries everything the
+        // old chip row and header menu held. They are drawn
+        // after the page column and live OUTSIDE the recorded
+        // subtree, sampling the recorded page (poster
+        // included) behind themselves, like the dock discs
+        // in ForteRoot.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(top = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .liveCapsuleGlass(playerBackdrop, CircleShape, capsuleBlurPx)
+                    .clickable { onCollapse() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.KeyboardArrowDown,
+                    contentDescription = "Minimize player",
+                    tint = Color.White, modifier = Modifier.size(24.dp),
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .liveCapsuleGlass(playerBackdrop, CircleShape, capsuleBlurPx)
+                    .clickable { showMoreSheet = true },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.MoreVert, contentDescription = "More",
+                    tint = Color.White, modifier = Modifier.size(22.dp),
+                )
+            }
+        }
+      }
     }
 
     if (showFullLyrics && lyrics != null) {
         AlertDialog(
             onDismissRequest = { showFullLyrics = false },
-            containerColor = ForteColors.SurfaceHi,
+            containerColor = DockFrostTint,
+            modifier = Modifier.border(1.dp, DockFrostOutline, RoundedCornerShape(28.dp)),
             title = { Text(track.title, color = Color.White) },
             text = {
                 val synced = lyricsResult?.synced
@@ -873,6 +1146,7 @@ fun PlayerScreen(
         // YouTube's published lines, or the honest empty state.
         ForteActionSheet(
             onDismiss = { showCredits = false },
+            frost = true,
             header = {
                 Text(
                     "Song credits", fontSize = 20.sp,
@@ -932,6 +1206,7 @@ fun PlayerScreen(
         // pick keeps it open and says why, as the dialog did).
         ForteActionSheet(
             onDismiss = { showOutput = false },
+            frost = true,
             header = {
                 Column {
                     Text(
@@ -985,7 +1260,7 @@ fun PlayerScreen(
         } else {
             "${state.speed}×"
         }
-        ForteActionSheet(onDismiss = { showMoreSheet = false }) {
+        ForteActionSheet(onDismiss = { showMoreSheet = false }, frost = true) {
             if (lyrics != null) {
                 ForteSheetRow(Icons.Filled.Lyrics, "Lyrics") {
                     showMoreSheet = false
@@ -1062,6 +1337,54 @@ fun PlayerScreen(
                 showMoreSheet = false
                 actions.startRadio(track)
             }
+            // The rows the Sample B deck no longer carries on its
+            // face (v1.0.23-test): the old chip row's download and
+            // dislike, the output pill, and the song menu's queue
+            // actions — same wiring, sheet homes.
+            ForteSheetRow(Icons.Filled.PlaylistPlay, "Play next") {
+                showMoreSheet = false
+                actions.playNext(track)
+            }
+            ForteSheetRow(Icons.Filled.QueueMusic, "Add to queue") {
+                showMoreSheet = false
+                actions.addToQueue(track)
+            }
+            ForteSheetRow(
+                if (isDownloaded) Icons.Filled.Check else Icons.Filled.Download,
+                if (isDownloaded) "Downloaded" else "Download",
+                iconTint = if (isDownloaded) ForteColors.Red else Color.White,
+                trailing = {
+                    if (dlProgress != null && dlProgress.error == null) {
+                        CircularProgressIndicator(
+                            color = Color.White, strokeWidth = 2.dp,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                },
+            ) {
+                if (!isDownloaded && dlProgress == null) {
+                    showMoreSheet = false
+                    actions.download(track)
+                }
+            }
+            ForteSheetRow(Icons.Filled.Speaker, "Audio output") {
+                showMoreSheet = false
+                showOutput = true
+            }
+            ForteSheetRow(
+                Icons.Filled.ThumbDown,
+                if (isDisliked) "Remove dislike" else "Dislike — skip this song",
+                iconTint = if (isDisliked) ForteColors.TrueRed else Color.White,
+            ) {
+                showMoreSheet = false
+                toggleDislike()
+            }
+            if (!track.artistUrl.isNullOrBlank()) {
+                ForteSheetRow(Icons.Filled.Person, "Go to artist") {
+                    showMoreSheet = false
+                    actions.goToArtist(track)
+                }
+            }
         }
     }
 
@@ -1076,6 +1399,140 @@ fun PlayerScreen(
             current = forteSettings.audioQuality,
             onPick = { app.settings.setAudioQuality(it) },
             onDismiss = { showQuality = false },
+        )
+    }
+}
+
+/** The expanded panel's full height (v1.0.30-test): its
+ * two rows (116dp) plus the 6dp gap that used to be a
+ * sibling spacer under it. The panel's measured height is
+ * this times the sheet fraction — capped by the room the
+ * deck leaves (see panelCapHeight in PlayerScreen). */
+private val ExpandedPanelFullHeight = 122.dp
+
+/**
+ * The deck sheet's two resting states (v1.0.29-test):
+ * fraction 0 = the v1.0.28-test rest (top edge ~64% of the
+ * screen), 1 = grown to ~82%. Modelled on the outer
+ * [PlayerSheetState]: the finger writes the fraction
+ * directly (no animation between the finger and the
+ * sheet), a release settles with the same spring the
+ * player sheet uses, and fling wins over position.
+ */
+private class PlayerDeckSheetState(private val scope: kotlinx.coroutines.CoroutineScope) {
+
+    var fraction by mutableFloatStateOf(0f)
+        private set
+
+    /**
+     * True while a drag or a settle animation is in flight
+     * (v1.0.30-test). The player watches this to FREEZE its
+     * backdrop recordings for the duration — the recorded
+     * poster cannot change under a finger, and re-recording
+     * + re-blurring its layers per drag frame was pure cost
+     * (see BackdropState.frozen).
+     */
+    var motionActive by mutableStateOf(false)
+        private set
+
+    private var settleJob: Job? = null
+
+    // Incremented by every new motion; a settle job only
+    // clears [motionActive] if its generation is still the
+    // current one — a drag that cancels the job mid-flight
+    // must not let the dead job's cleanup unfreeze the
+    // backdrop under the finger.
+    private var motionGen = 0
+
+    /** Feed a finger delta (px, positive = finger moved down). */
+    fun dragBy(dyPx: Float, rangePx: Float) {
+        if (rangePx <= 0f) return
+        settleJob?.cancel()
+        settleJob = null
+        motionGen++
+        motionActive = true
+        fraction = (fraction - dyPx / rangePx).coerceIn(0f, 1f)
+    }
+
+    /** Release: fling wins, otherwise settle to the nearest state. */
+    fun settle(velocityYPxPerSec: Float) {
+        val target = when {
+            velocityYPxPerSec < -FLING_PX_PER_SEC -> 1f
+            velocityYPxPerSec > FLING_PX_PER_SEC -> 0f
+            fraction >= 0.5f -> 1f
+            else -> 0f
+        }
+        animateTo(target)
+    }
+
+    /** Handle tap: jump to the other resting state. */
+    fun toggle() = animateTo(if (fraction >= 0.5f) 0f else 1f)
+
+    private fun animateTo(target: Float) {
+        settleJob?.cancel()
+        val from = fraction
+        if (from == target) {
+            fraction = target
+            settleJob = null
+            motionActive = false
+            return
+        }
+        val gen = ++motionGen
+        motionActive = true
+        settleJob = scope.launch {
+            Animatable(from).animateTo(
+                target,
+                spring(
+                    dampingRatio = 0.92f,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+            ) { fraction = value }
+            fraction = target
+            if (gen == motionGen) motionActive = false
+        }
+    }
+
+    private companion object {
+        const val FLING_PX_PER_SEC = 550f
+    }
+}
+
+/** One quick-action cell of the player's expanded panel
+ * (v1.0.29-test): icon over a small label on a faint pill.
+ * [busy] swaps the icon for a spinner (the download's
+ * in-flight state, mirroring the more-sheet's row). */
+@Composable
+private fun PlayerQuickAction(
+    icon: ImageVector,
+    label: String,
+    tint: Color,
+    modifier: Modifier = Modifier,
+    busy: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.06f))
+            .clickable { onClick() }
+            .padding(vertical = 9.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        if (busy) {
+            CircularProgressIndicator(
+                color = Color.White, strokeWidth = 2.dp,
+                modifier = Modifier.size(21.dp),
+            )
+        } else {
+            Icon(
+                icon, contentDescription = label,
+                tint = tint, modifier = Modifier.size(21.dp),
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+            color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -1100,7 +1557,8 @@ private fun PlayerQualityDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = ForteColors.SurfaceHi,
+        containerColor = DockFrostTint,
+        modifier = Modifier.border(1.dp, DockFrostOutline, RoundedCornerShape(28.dp)),
         title = { Text("Audio quality", color = Color.White) },
         text = {
             Column {
@@ -1207,30 +1665,36 @@ private fun ForteProgressBar(
             Modifier
                 .fillMaxWidth()
                 .align(Alignment.Center)
-                .height(3.dp)
+                .height(4.dp)
                 .clip(RoundedCornerShape(50))
-                .background(ForteColors.SurfaceHi),
+                .background(Color.White.copy(alpha = 0.22f)),
         ) {
             Box(
                 Modifier
                     .fillMaxWidth(fraction)
                     .fillMaxHeight()
-                    // TRUE red (v1.0.20-test): the played portion is
-                    // one of the owner's small red points — solid
-                    // #FF0000, not the muted shipped Red.
-                    .background(ForteColors.TrueRed),
+                    // The played part is RED (owner's order,
+                    // v1.0.28-test: "Seek bar red boss, that
+                    // thing keep") — the brand red, the FORTE.
+                    // dot's red: ForteColors.Red, the same red
+                    // as the liked heart. (Sample B had made
+                    // the bar white end to end; the owner
+                    // asked for the red back.) The unplayed
+                    // track keeps its white-at-22%, and the
+                    // knob below matches the played part.
+                    .background(ForteColors.Red),
             )
         }
-        if (scrubbing) {
-            Box(
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .offset(x = maxWidth * fraction - 6.dp)
-                    .size(12.dp)
-                    .clip(CircleShape)
-                    .background(Color.White),
-            )
-        }
+        Box(
+            Modifier
+                .align(Alignment.CenterStart)
+                .offset(x = maxWidth * fraction - 6.5.dp)
+                .size(13.dp)
+                .clip(CircleShape)
+                // The knob wears the same brand red as the
+                // played part (v1.0.28-test).
+                .background(ForteColors.Red),
+        )
         var lastScrub by remember { mutableStateOf<Float?>(null) }
         Box(
             Modifier
@@ -1355,7 +1819,8 @@ fun SleepTimerDialog(onDismiss: () -> Unit) {
     val playState by controller.state.collectAsState()
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = ForteColors.SurfaceHi,
+        containerColor = DockFrostTint,
+        modifier = Modifier.border(1.dp, DockFrostOutline, RoundedCornerShape(28.dp)),
         title = { Text("Sleep timer", color = Color.White) },
         text = {
             Column {
@@ -1416,7 +1881,8 @@ fun EqualizerDialog(onDismiss: () -> Unit) {
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = ForteColors.SurfaceHi,
+        containerColor = DockFrostTint,
+        modifier = Modifier.border(1.dp, DockFrostOutline, RoundedCornerShape(28.dp)),
         title = { Text("Equalizer", color = Color.White) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {

@@ -4,6 +4,9 @@ import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -1214,7 +1217,7 @@ object YtAccount {
         )
         val label = chartCountryLabel(root)
         val direct = collectTracks(root)
-        if (direct.size >= 8) return@withContext ChartsResult(label, direct)
+        if (direct.size >= 8) return@withContext ChartsResult(label, withHeroFrames(direct))
         // Charts are mostly playlist cards (Daily Top Music Videos,
         // Trending 20, Top 100…): open the best-ranked one and chart
         // its tracks.
@@ -1238,9 +1241,36 @@ object YtAccount {
         for (card in ranked) {
             val tracks = runCatching { playlistTracks(card.browseId) }
                 .getOrDefault(emptyList())
-            if (tracks.isNotEmpty()) return@withContext ChartsResult(label, tracks)
+            if (tracks.isNotEmpty()) return@withContext ChartsResult(label, withHeroFrames(tracks))
         }
-        ChartsResult(label, direct)
+        ChartsResult(label, withHeroFrames(direct))
+    }
+
+    /**
+     * Hero frames at full quality (v1.0.26-test): chart
+     * tracks carry i.ytimg video frames, whose ladder rung
+     * for the hero was hqdefault — 480×360 stretched over
+     * the full-bleed hero read as mush (owner: "Hero section
+     * posters quality is so bad"). Before the list reaches
+     * the UI, the hero-bound head of it (the hero shows the
+     * first eight) has each frame resolved ONCE to
+     * maxresdefault when the video truly has one (see
+     * [ArtworkResolver.maxresFrame] for the placeholder
+     * trap). The chosen URL rides the track from here —
+     * hero display, poster prefetch and any saved row all
+     * inherit it — so no visible card ever swaps its
+     * picture late. Tracks with real cover art pass through
+     * untouched, and the probes run side by side, so the
+     * charts load pays for the slowest one, not the sum.
+     */
+    private suspend fun withHeroFrames(tracks: List<Track>): List<Track> {
+        if (tracks.isEmpty()) return tracks
+        val resolved = coroutineScope {
+            tracks.take(8).map { track ->
+                async { ArtworkResolver.maxresFrame(track) ?: track }
+            }.awaitAll()
+        }
+        return resolved + tracks.drop(8)
     }
 
     /** The country the charts server actually selected, read from

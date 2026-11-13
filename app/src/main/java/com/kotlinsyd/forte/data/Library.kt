@@ -9,6 +9,7 @@ import com.kotlinsyd.forte.data.db.toFavorite
 import com.kotlinsyd.forte.data.db.toHistory
 import com.kotlinsyd.forte.data.db.toPlaylistTrack
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 /** The on-device library: favorites, playlists, history, follows, downloads.
@@ -103,6 +104,45 @@ class Library(context: Context) {
             dao.fillFavoriteThumb(videoId, url)
             dao.fillPlaylistThumb(videoId, url)
             dao.fillDownloadThumb(videoId, url)
+        }
+    }
+
+    /** The overwrite twin of [persistArtwork]: a resolved cover
+     * replaces the frame a row already carries. */
+    suspend fun persistArtworkUpgrade(videoId: String, url: String) {
+        runCatching {
+            dao.setHistoryThumb(videoId, url)
+            dao.setFavoriteThumb(videoId, url)
+            dao.setPlaylistThumb(videoId, url)
+            dao.setDownloadThumb(videoId, url)
+        }
+    }
+
+    /**
+     * Kill the late poster swap (v1.0.24-test): history rows whose
+     * only picture is a video frame used to upgrade at DISPLAY
+     * time (rememberEnrichedArtwork), so Listen again painted the
+     * frame and swapped in the album cover a moment later. This
+     * background pass resolves the same covers once — through the
+     * same ArtworkResolver — and writes them into the tables, so
+     * the stored row already carries the final poster and first
+     * paint shows it. Capped and fenced like [backfillArtwork];
+     * the resolver caches per process, so rows are asked once.
+     */
+    suspend fun upgradeHistoryArtwork() {
+        val rows = runCatching { historyRows.first() }
+            .getOrDefault(emptyList())
+        val seen = mutableSetOf<String>()
+        var done = 0
+        for (row in rows) {
+            if (done >= 30) break
+            if (!seen.add(row.videoId)) continue
+            val track = row.toTrack()
+            if (!ArtworkResolver.needsUpgrade(track.thumbUrl)) continue
+            val url = runCatching { ArtworkResolver.itunesCover(track) }
+                .getOrNull()?.takeIf { it.isNotBlank() } ?: continue
+            persistArtworkUpgrade(row.videoId, url)
+            done++
         }
     }
 }

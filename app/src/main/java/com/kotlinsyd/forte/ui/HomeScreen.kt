@@ -2,6 +2,7 @@ package com.kotlinsyd.forte.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,7 +25,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -35,6 +40,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -240,79 +246,125 @@ fun HomeScreen(
             .getDisplayLanguage(java.util.Locale.ENGLISH)
             .replaceFirstChar { it.uppercase() }
 
-    // Ambience: the playing song's colour washes the top of Home.
-    val rawTint by app.nowPlayingTint.collectAsState()
-    val tint by androidx.compose.animation.animateColorAsState(
-        rawTint, animationSpec = androidx.compose.animation.core.tween(800),
-        label = "homeTint",
-    )
-    Box(Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(240.dp)
-                .background(
-                    androidx.compose.ui.graphics.Brush.verticalGradient(
-                        listOf(tint.copy(alpha = 0.30f), ForteColors.Bg),
-                    )
-                ),
-        )
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        // Invisible end clearance only — the list itself scrolls
-        // behind the floating dock to the physical screen edge.
-        contentPadding = PaddingValues(bottom = 16.dp + LocalDockClearance.current),
-    ) {
-        item {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 20.dp, end = 16.dp, top = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column {
-                    androidx.compose.foundation.Image(
-                        painter = painterResource(R.drawable.forte_wordmark),
-                        contentDescription = "FORTE.",
-                        modifier = Modifier.height(24.dp),
-                    )
-                    Spacer(Modifier.height(5.dp))
-                    Text(
-                        regionLine,
-                        fontSize = 13.sp, color = ForteColors.TextDim,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Spacer(Modifier.weight(1f))
-                // Profile (owner's order): his account photo when
-                // signed in, a plain profile icon when not. This
-                // avatar is the ONE settings door (v1.0.7): signed
-                // out it opens Settings, signed in the account sheet.
-                val avatar = headerAvatar ?: app.settings.accountAvatar()
-                Box(
-                    modifier = Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .background(ForteColors.SurfaceHi)
-                        .clickable { onOpenAccount() },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (signedIn && !avatar.isNullOrBlank()) {
-                        coil.compose.AsyncImage(
-                            model = avatar,
-                            contentDescription = "Your account",
-                            modifier = Modifier.fillMaxSize().clip(CircleShape),
-                        )
-                    } else {
-                        Icon(
-                            Icons.Filled.Person, contentDescription = "Account",
-                            tint = Color.White, modifier = Modifier.size(20.dp),
-                        )
-                    }
+    val scope = rememberCoroutineScope()
+    // HERO content rule (v1.0.24-test, owner's order): the hero
+    // carries ONLY top hits — the picked region's Top Charts in
+    // chart order (YtAccount.charts; chartsLabel names the
+    // country the server really selected), top 8. The first
+    // hero (v1.0.23-test) sampled the feed's album/playlist
+    // cards at random and the owner sent it back: "only top
+    // hit songs … most popular ones, not all bad include".
+    // Fallback when charts come back empty: the feed's own
+    // taste shelf (Mixed for you), then his most-played
+    // history. While charts are still loading there is no hero
+    // — it joins when they land and never holds the page up.
+    // No source, no hero (never a broken hero).
+    val heroTracks: List<Track> = remember(charts, homeShelves, history, chartsFailed) {
+        when {
+            !charts.isNullOrEmpty() -> charts.orEmpty().take(8)
+            chartsFailed || charts != null -> {
+                val mixed = homeShelves
+                    ?.firstOrNull { it.title.contains("Mixed", ignoreCase = true) }
+                    ?.tracks.orEmpty()
+                when {
+                    mixed.isNotEmpty() -> mixed.take(8)
+                    history.size >= 3 -> history.take(8)
+                    else -> emptyList()
                 }
             }
+            else -> emptyList()
         }
+    }
+    val heroFromCharts = !charts.isNullOrEmpty() && heroTracks.isNotEmpty()
+    val heroEyebrow = when {
+        heroFromCharts ->
+            "TOP CHARTS" + (chartsLabel?.let { " · ${it.uppercase()}" } ?: "")
+        heroTracks.isNotEmpty() -> "MADE FOR YOU"
+        else -> ""
+    }
+    val heroOrigin = if (heroFromCharts) "Top charts" else "Made for you"
 
+    // CARD TAP = PLAY (v1.0.24-test, owner's rule): a card tap
+    // never lands on a playlist page — those pages usually hold
+    // just the one song anyway. The tap fetches the page behind
+    // the scenes and its first track opens in the player with
+    // the rest as the queue; the page itself opens only when
+    // the fetch returns nothing playable.
+    val playCard: (com.kotlinsyd.forte.data.YtAccount.HomeCard) -> Unit = { card ->
+        scope.launch {
+            val page = runCatching {
+                com.kotlinsyd.forte.data.YtAccount.playlistPage(card.browseId)
+            }.getOrNull()
+            val tracks = page?.tracks.orEmpty()
+            if (tracks.isNotEmpty()) {
+                actions.play(tracks.first(), tracks, card.title)
+            } else {
+                onOpenYtPlaylist(card.browseId)
+            }
+        }
+    }
+
+    // Poster prefetch (v1.0.24-test): when Home's data lands,
+    // warm the hero posters and the first shelf's covers at the
+    // exact ladder sizes their slots will request, so first
+    // paint finds them in the image cache, not on the network.
+    val prefetchedUrls = remember { mutableSetOf<String>() }
+    LaunchedEffect(charts, homeShelves) {
+        val loader = coil.Coil.imageLoader(context)
+        val want = mutableListOf<Pair<String, com.kotlinsyd.forte.data.ArtSize>>()
+        charts.orEmpty().take(8).forEach { t ->
+            t.thumbUrl?.let { want += it to com.kotlinsyd.forte.data.ArtSize.HERO }
+        }
+        homeShelves?.firstOrNull()?.let { shelf ->
+            shelf.tracks.take(6).forEach { t ->
+                t.thumbUrl?.let { want += it to com.kotlinsyd.forte.data.ArtSize.CARD }
+            }
+            shelf.cards.take(6).forEach { c ->
+                c.thumbUrl?.let { want += it to com.kotlinsyd.forte.data.ArtSize.CARD }
+            }
+        }
+        for ((url, size) in want) {
+            val sized = com.kotlinsyd.forte.data.artworkAt(url, size) ?: continue
+            if (!prefetchedUrls.add(sized)) continue
+            loader.enqueue(
+                coil.request.ImageRequest.Builder(context).data(sized).build(),
+            )
+        }
+    }
+
+    // (The now-playing colour wash that used to sit behind
+    // the top of Home is gone in v1.0.28-test: the owner's
+    // approved hero design puts the header zone on PURE
+    // black, and a tinted wash behind it would colour that
+    // black.)
+    Box(Modifier.fillMaxSize()) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        // Invisible end clearance — the list itself scrolls
+        // behind the floating dock to the physical screen edge.
+        // Top: the header zone (v1.0.28-test) — the black bar
+        // (66dp) plus its fade strip (14dp) — is exactly 80dp,
+        // hero or no hero, so the hero poster's top edge lands
+        // precisely where the black has finished fading and
+        // the poster itself starts clean.
+        contentPadding = PaddingValues(
+            top = 80.dp,
+            bottom = 16.dp + LocalDockClearance.current,
+        ),
+    ) {
+        if (heroTracks.isNotEmpty()) {
+            item {
+                HomeHero(
+                    tracks = heroTracks,
+                    eyebrow = heroEyebrow,
+                    isFavorite = { track -> track.id in favoriteIds },
+                    onPlay = { track ->
+                        actions.play(track, heroTracks, heroOrigin)
+                    },
+                    onToggleFavorite = { track -> actions.toggleFavorite(track) },
+                )
+            }
+        }
         if (history.isNotEmpty()) {
             item {
                 Spacer(Modifier.height(26.dp))
@@ -323,17 +375,26 @@ fun HomeScreen(
                     modifier = Modifier.padding(horizontal = 20.dp),
                 )
                 Spacer(Modifier.height(12.dp))
-                // Recents open Home as list rows, not a card shelf
-                // (v1.0.14): one thumb + play per row, four deep —
-                // resuming a song is one tap, not a shelf browse.
-                Column(Modifier.padding(horizontal = 16.dp)) {
-                    history.take(4).forEach { track ->
-                        TrackRow(
+                // SAMPLE A (v1.0.23-test, owner's pick): Listen
+                // again is a card row now — big square artwork
+                // cards, title under each, artist under that. A
+                // tap plays the song in its history queue, as the
+                // rows did; the rows' three-dot menu rides a long
+                // press on the card. A plain scrollable Row, not
+                // a LazyRow (FORTE-9's nested-lazy lesson — the
+                // shelves below follow the same rule).
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    history.forEach { track ->
+                        ListenAgainCard(
                             track = track,
                             actions = actions,
                             isFavorite = track.id in favoriteIds,
                             isCurrent = track.id == currentTrackId,
-                            isPlaying = isPlaying,
                             onClick = { actions.play(track, history, "Listen again") },
                         )
                     }
@@ -391,13 +452,28 @@ fun HomeScreen(
                         ) {
                             Artwork(track.thumbUrl, track.title, 156.dp, corner = 14.dp)
                             Spacer(Modifier.height(8.dp))
+                            // Fitted titles (v1.0.24-test, the
+                            // YouTube Music rule the owner
+                            // ordered): the title may take TWO
+                            // lines and its block is RESERVED at
+                            // two lines (38dp at cardTitle's 19sp
+                            // line height) whether the title
+                            // needs them or not, and the subtitle
+                            // line is always reserved too — so
+                            // every card in the row stands the
+                            // same height and nothing runs long
+                            // or jumps.
                             Text(
                                 track.title, style = ForteType.cardTitle,
-                                color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                color = Color.White, maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.height(38.dp),
                             )
                             Text(
-                                track.artist, style = ForteType.cardSub, color = ForteColors.TextDim,
+                                track.artist, style = ForteType.cardSub,
+                                color = ForteColors.TextDim,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.height(17.dp),
                             )
                         }
                     }
@@ -405,17 +481,23 @@ fun HomeScreen(
                         Column(
                             modifier = Modifier
                                 .width(156.dp)
-                                .clickable { onOpenYtPlaylist(card.browseId) },
+                                // Card tap = play (v1.0.24-test):
+                                // never the playlist page.
+                                .clickable { playCard(card) },
                         ) {
                             Artwork(card.thumbUrl, card.title, 156.dp, corner = 14.dp)
                             Spacer(Modifier.height(8.dp))
                             Text(
                                 card.title, style = ForteType.cardTitle,
-                                color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                color = Color.White, maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.height(38.dp),
                             )
                             Text(
-                                card.subtitle ?: "", style = ForteType.cardSub, color = ForteColors.TextDim,
+                                card.subtitle ?: "", style = ForteType.cardSub,
+                                color = ForteColors.TextDim,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.height(17.dp),
                             )
                         }
                     }
@@ -522,7 +604,12 @@ fun HomeScreen(
                                         Row {
                                             thumbs.take(2).forEach { url ->
                                                 coil.compose.AsyncImage(
-                                                    model = com.kotlinsyd.forte.data.bigArtwork(url),
+                                                    model = com.kotlinsyd.forte.data.artworkAt(
+                                                        url,
+                                                        com.kotlinsyd.forte.data.ArtSize.ROW,
+                                                    ),
+                                                    placeholder = rememberArtworkPainter(playlist.name),
+                                                    error = rememberArtworkPainter(playlist.name),
                                                     contentDescription = null,
                                                     contentScale = ContentScale.Crop,
                                                     modifier = Modifier.size(78.dp),
@@ -532,7 +619,12 @@ fun HomeScreen(
                                         Row {
                                             thumbs.drop(2).take(2).forEach { url ->
                                                 coil.compose.AsyncImage(
-                                                    model = com.kotlinsyd.forte.data.bigArtwork(url),
+                                                    model = com.kotlinsyd.forte.data.artworkAt(
+                                                        url,
+                                                        com.kotlinsyd.forte.data.ArtSize.ROW,
+                                                    ),
+                                                    placeholder = rememberArtworkPainter(playlist.name),
+                                                    error = rememberArtworkPainter(playlist.name),
                                                     contentDescription = null,
                                                     contentScale = ContentScale.Crop,
                                                     modifier = Modifier.size(78.dp),
@@ -541,7 +633,12 @@ fun HomeScreen(
                                         }
                                     }
                                     thumbs.isNotEmpty() -> coil.compose.AsyncImage(
-                                        model = com.kotlinsyd.forte.data.bigArtwork(thumbs.first()),
+                                        model = com.kotlinsyd.forte.data.artworkAt(
+                                            thumbs.first(),
+                                            com.kotlinsyd.forte.data.ArtSize.CARD,
+                                        ),
+                                        placeholder = rememberArtworkPainter(playlist.name),
+                                        error = rememberArtworkPainter(playlist.name),
                                         contentDescription = null,
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier.fillMaxSize(),
@@ -552,11 +649,14 @@ fun HomeScreen(
                             Spacer(Modifier.height(8.dp))
                             Text(
                                 playlist.name, style = ForteType.cardTitle,
-                                color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                color = Color.White, maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.height(38.dp),
                             )
                             Text(
                                 "$count songs", style = ForteType.cardSub,
                                 color = ForteColors.TextDim,
+                                modifier = Modifier.height(17.dp),
                             )
                         }
                     }
@@ -565,6 +665,93 @@ fun HomeScreen(
         }
 
     }
+        // The header zone (owner-approved hero design,
+        // v1.0.28-test): the wordmark + region line + account
+        // avatar sit on PURE BLACK — a solid black bar with a
+        // short black fade under it. The bar floats over the
+        // page top as the header always has; what changed is
+        // that it no longer floats over the hero's artwork —
+        // the list's top clearance (80dp) is exactly this bar
+        // plus this fade, so the hero poster begins below the
+        // black, fully clean (see HomeHero).
+        Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color.Black)
+                .padding(start = 20.dp, end = 16.dp, top = 14.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column {
+                androidx.compose.foundation.Image(
+                    painter = painterResource(R.drawable.forte_wordmark),
+                    contentDescription = "FORTE.",
+                    modifier = Modifier.height(24.dp),
+                )
+                Spacer(Modifier.height(5.dp))
+                // The line still goes full white when a hero
+                // is up (owner's rule, v1.0.24-test: over the
+                // hero it must READ at full strength, never
+                // dim). It needs no shadow trick anymore:
+                // since v1.0.28-test the header sits on its
+                // own pure-black bar, never over the artwork.
+                // On plain-background pages it stays the dim
+                // line it has always been.
+                Text(
+                    regionLine,
+                    fontSize = 13.sp,
+                    color = if (heroTracks.isNotEmpty()) {
+                        Color.White
+                    } else {
+                        ForteColors.TextDim
+                    },
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            // Profile (owner's order): his account photo when
+            // signed in, a plain profile icon when not. This
+            // avatar is the ONE settings door (v1.0.7): signed
+            // out it opens Settings, signed in the account sheet.
+            val avatar = headerAvatar ?: app.settings.accountAvatar()
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(ForteColors.SurfaceHi)
+                    .clickable { onOpenAccount() },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (signedIn && !avatar.isNullOrBlank()) {
+                    coil.compose.AsyncImage(
+                        model = avatar,
+                        contentDescription = "Your account",
+                        modifier = Modifier.fillMaxSize().clip(CircleShape),
+                    )
+                } else {
+                    Icon(
+                        Icons.Filled.Person, contentDescription = "Account",
+                        tint = Color.White, modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+        }
+        // The fade out of the black: a short melt from the
+        // bar's black to transparent. It completes exactly
+        // where the hero poster's top edge sits — the list's
+        // 80dp top clearance is this bar plus this strip — so
+        // the poster itself carries no dark at all.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(14.dp)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Black, Color.Transparent),
+                    ),
+                ),
+        )
+        }
     }
 }
 
@@ -740,7 +927,12 @@ fun MoodCard(
         )
         if (!artUrl.isNullOrBlank()) {
             coil.compose.AsyncImage(
-                model = com.kotlinsyd.forte.data.bigArtwork(artUrl),
+                model = com.kotlinsyd.forte.data.artworkAt(
+                    artUrl,
+                    com.kotlinsyd.forte.data.ArtSize.CARD,
+                ),
+                placeholder = rememberArtworkPainter(title),
+                error = rememberArtworkPainter(title),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
@@ -808,7 +1000,12 @@ fun MoodScreen(
                     .clip(RoundedCornerShape(16.dp)),
             ) {
                 coil.compose.AsyncImage(
-                    model = com.kotlinsyd.forte.data.bigArtwork(heroArt),
+                    model = com.kotlinsyd.forte.data.artworkAt(
+                        heroArt,
+                        com.kotlinsyd.forte.data.ArtSize.HERO,
+                    ),
+                    placeholder = rememberArtworkPainter(title),
+                    error = rememberArtworkPainter(title),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
@@ -894,6 +1091,360 @@ fun MoodScreen(
                                         )
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------
+// Sample A + Sample 1 pieces (v1.0.23-test): the Listen again
+// card and the Home hero.
+// ----------------------------------------------------------------------
+
+/** The hero page's meta line: the artist, plus the play count
+ * when the chart carries one. */
+private fun heroMetaLine(track: Track): String =
+    listOf(
+        track.artist,
+        if (track.viewCount > 0) "${formatViews(track.viewCount)} plays" else "",
+    ).filter { it.isNotBlank() }.joinToString(" · ")
+
+/**
+ * One Listen again card (Sample A): 148dp square artwork, the
+ * title under it (one line, trimmed), the artist under that in
+ * grey. An item without artwork stands on a rich per-title
+ * gradient with a music-note glyph — never the bare-letter tile
+ * (that cheap look is what this replaces). Tap plays; a long
+ * press opens the track's menu (the row menu's sheet, hoisted).
+ */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun ListenAgainCard(
+    track: Track,
+    actions: TrackActions,
+    isFavorite: Boolean,
+    isCurrent: Boolean,
+    onClick: () -> Unit,
+) {
+    var menuOpen by remember(track.id) { mutableStateOf(false) }
+    val url = rememberEnrichedArtwork(track)
+    Column(Modifier.width(148.dp)) {
+        Box(
+            modifier = Modifier
+                .size(148.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Brush.linearGradient(artworkGradient(track.title)))
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { menuOpen = true },
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.MusicNote, contentDescription = null,
+                tint = Color.White.copy(alpha = 0.92f),
+                modifier = Modifier.size(38.dp),
+            )
+            if (!url.isNullOrBlank()) {
+                coil.compose.AsyncImage(
+                    model = com.kotlinsyd.forte.data.artworkAt(
+                        url,
+                        com.kotlinsyd.forte.data.ArtSize.CARD,
+                    ),
+                    placeholder = rememberArtworkPainter(track.title),
+                    error = rememberArtworkPainter(track.title),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+        Spacer(Modifier.height(7.dp))
+        // Fitted titles, same rule as the shelf cards
+        // (v1.0.24-test): unified to the cardTitle step (15sp —
+        // this card used to run its own 14/12sp pair), two
+        // lines with the 38dp block reserved, the artist line
+        // always reserved under it.
+        Text(
+            track.title,
+            style = ForteType.cardTitle,
+            color = if (isCurrent) ForteColors.Red else Color.White,
+            maxLines = 2, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.height(38.dp),
+        )
+        Text(
+            track.artist.ifBlank { "Song" },
+            style = ForteType.cardSub, color = ForteColors.TextDim,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.height(17.dp),
+        )
+        TrackMenu(
+            track = track, actions = actions, isFavorite = isFavorite,
+            hoistedOpen = menuOpen,
+            onHoistedOpenChange = { menuOpen = it },
+        )
+    }
+}
+
+/**
+ * The Home hero (owner-approved design, v1.0.28-test —
+ * the sample forte-hero-bleed-sample-v2.png, his verdict
+ * "Perfect"): the poster WHOLE at its original aspect,
+ * full width, uncropped, no stretch — and NOTHING drawn
+ * over it: no veil, no fade. The header zone above it is
+ * pure black and its fade completes above the poster's
+ * top edge (see the header in HomeScreen), so the poster
+ * starts clean and stays clean. ~8dp under the poster, on
+ * the plain page background: the eyebrow, the big title,
+ * the meta line, and the Play row — a solid white Play
+ * pill, the pure-frost favourite heart, and the carousel
+ * dots riding the row's right end. Tight — no blank band
+ * anywhere — and Listen again flows straight in below.
+ *
+ * The CONTENT is tracks (v1.0.24-test): the region's Top
+ * Charts in chart order (see the heroTracks rule in
+ * HomeScreen). Tapping the poster PLAYS — the same rule
+ * as every card on Home — it never opens a page. The
+ * favourite heart is the track's own like, the add Forte
+ * has for a song. A slow carousel (6 s) that also swipes.
+ */
+/**
+ * The hero's displayed title (owner's rule, v1.0.25-test):
+ * ONLY the main name. The original title is cut at the first
+ * bracket suffix — "(feat. …)", "(From "…")" and the like
+ * are dropped entirely, never wrapped, never "cleaned" or
+ * reordered: "Casa Tupka Anthemo (feat. Priyanshi
+ * Srivastava)" shows as "Casa Tupka Anthemo"; "Tu Mil Jaaye
+ * (From "KING")" shows as "Tu Mil Jaaye". If what remains is
+ * still too long, the Text ellipsizes it. If cutting would
+ * leave an empty or near-empty string (the title itself
+ * starts with a bracket), the original title stands.
+ * DISPLAY ONLY — the track keeps its full original title
+ * everywhere else (player, menus, library).
+ */
+private fun heroTitle(title: String): String {
+    val cut = title.indexOf(" (")
+    if (cut < 0) return title
+    val main = title.substring(0, cut).trim()
+    return if (main.length >= 2) main else title
+}
+
+@Composable
+private fun HomeHero(
+    tracks: List<Track>,
+    eyebrow: String,
+    isFavorite: (Track) -> Boolean,
+    onPlay: (Track) -> Unit,
+    onToggleFavorite: (Track) -> Unit,
+) {
+    val pagerState = androidx.compose.foundation.pager.rememberPagerState(
+        pageCount = { tracks.size },
+    )
+    LaunchedEffect(tracks.size) {
+        if (tracks.size > 1) {
+            while (true) {
+                kotlinx.coroutines.delay(6_000)
+                if (!pagerState.isScrollInProgress) {
+                    pagerState.animateScrollToPage(
+                        (pagerState.currentPage + 1) % tracks.size,
+                    )
+                }
+            }
+        }
+    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    // Each poster's TRUE aspect (width / height), learned
+    // from the artwork itself — a fit-into-96×96 decode
+    // preserves the source's aspect, so the bitmap's own
+    // dimensions carry it (the player's own trick). Keyed
+    // by track id. The poster zone's height follows the
+    // CURRENT page's aspect, so a 16:9 chart frame stands
+    // at 16:9 and a square cover stands square; a poster
+    // that has not landed yet reads as 16:9, the charts'
+    // own shape.
+    var aspects by remember { mutableStateOf(mapOf<String, Float>()) }
+    LaunchedEffect(tracks) {
+        val loader = coil.Coil.imageLoader(context)
+        for (track in tracks) {
+            if (aspects.containsKey(track.id)) continue
+            val url = track.thumbUrl?.let {
+                com.kotlinsyd.forte.data.artworkAt(
+                    it,
+                    com.kotlinsyd.forte.data.ArtSize.HERO,
+                )
+            } ?: continue
+            runCatching {
+                val result = loader.execute(
+                    coil.request.ImageRequest.Builder(context)
+                        .data(url)
+                        .size(96, 96)
+                        .allowHardware(false)
+                        .build(),
+                )
+                if (result is coil.request.SuccessResult) {
+                    val bitmap = (result.drawable as?
+                        android.graphics.drawable.BitmapDrawable)?.bitmap
+                    if (bitmap != null && bitmap.width > 0 && bitmap.height > 0) {
+                        aspects = aspects +
+                            (track.id to bitmap.width.toFloat() / bitmap.height.toFloat())
+                    }
+                }
+            }
+        }
+    }
+    val currentTrack = tracks.getOrNull(pagerState.currentPage) ?: tracks.first()
+    val currentAspect = aspects[currentTrack.id] ?: (16f / 9f)
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+        // Full width at the poster's own aspect — the whole
+        // picture, uncropped, unstretched.
+        val posterHeight = maxWidth / currentAspect
+        Column(Modifier.fillMaxWidth()) {
+            Box(Modifier.fillMaxWidth().height(posterHeight)) {
+                androidx.compose.foundation.pager.HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier.fillMaxSize(),
+                ) { page ->
+                    val track = tracks[page]
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .clickable { onPlay(track) },
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.linearGradient(artworkGradient(track.title)),
+                                ),
+                        )
+                        if (!track.thumbUrl.isNullOrBlank()) {
+                            coil.compose.AsyncImage(
+                                model = com.kotlinsyd.forte.data.artworkAt(
+                                    track.thumbUrl,
+                                    com.kotlinsyd.forte.data.ArtSize.HERO,
+                                ),
+                                placeholder = rememberArtworkPainter(track.title),
+                                error = rememberArtworkPainter(track.title),
+                                contentDescription = null,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                        // NOTHING over the poster (v1.0.28-test):
+                        // the veils and fades the hero used to
+                        // paint across the artwork are gone —
+                        // the owner's word on the approved
+                        // sample was that the full poster stays
+                        // visible, with no dark added in it.
+                    }
+                }
+            }
+            // The text block, ~8dp under the poster's own
+            // bottom edge, on the plain page background. It
+            // follows the CURRENT page (the pager above now
+            // carries only posters).
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 20.dp, end = 20.dp, top = 8.dp),
+            ) {
+                Text(
+                    eyebrow,
+                    fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    color = Color.White.copy(alpha = 0.75f),
+                    letterSpacing = 2.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(6.dp))
+                // The title is ONE line (v1.0.29-test,
+                // owner's order on his v1.0.28-test
+                // screenshot: the two-line reserve the
+                // v1.0.24/.25-test fixes left behind put a
+                // hole under one-line titles — "Guzarish",
+                // then a gap before the artist). The rest
+                // is cut with an ellipsis ("rest ll be
+                // cutted" — his words); the artist line
+                // sits directly under the title. The text
+                // itself is still the owner's main-name
+                // rule (see heroTitle): the bracket suffix
+                // never displays. The player's two-line
+                // title is untouched.
+                Text(
+                    heroTitle(currentTrack.title),
+                    fontSize = 30.sp, fontWeight = FontWeight.ExtraBold,
+                    lineHeight = 38.sp,
+                    color = Color.White,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    heroMetaLine(currentTrack),
+                    fontSize = 14.sp,
+                    color = Color.White.copy(alpha = 0.78f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.height(20.dp),
+                )
+                Spacer(Modifier.height(14.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.White)
+                            .clickable { onPlay(currentTrack) }
+                            .padding(horizontal = 20.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.PlayArrow,
+                            contentDescription = "Play",
+                            tint = ForteColors.Bg,
+                            modifier = Modifier.size(19.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Play",
+                            fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                            color = ForteColors.Bg,
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    val fav = isFavorite(currentTrack)
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .frostedDarkGlass(CircleShape)
+                            .clickable { onToggleFavorite(currentTrack) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                            contentDescription = if (fav) "Liked" else "Like",
+                            tint = if (fav) ForteColors.Red else Color.White,
+                            modifier = Modifier.size(21.dp),
+                        )
+                    }
+                    if (tracks.size > 1) {
+                        Spacer(Modifier.weight(1f))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            tracks.indices.forEach { i ->
+                                val active = i == pagerState.currentPage
+                                Box(
+                                    Modifier
+                                        .size(if (active) 7.dp else 6.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            if (active) Color.White
+                                            else Color.White.copy(alpha = 0.35f),
+                                        ),
+                                )
                             }
                         }
                     }

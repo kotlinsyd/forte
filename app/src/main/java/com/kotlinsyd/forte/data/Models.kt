@@ -75,9 +75,95 @@ fun bigArtwork(url: String?): String? {
             val base = u.substringBefore("=")
             "$base=w1080-h1080-l90-rj"
         }
-        u.contains("i.ytimg.com") -> u
-            .replace("default.jpg", "hqdefault.jpg")
-            .replace("mqdefault.jpg", "hqdefault.jpg")
+        u.contains("i.ytimg.com") -> u.replace(
+            // Rewrite the frame FILENAME SEGMENT, never a
+            // substring (v1.0.25-test fix): the old code did
+            // .replace("default.jpg", "hqdefault.jpg"), which
+            // also matches the "default.jpg" INSIDE
+            // "hqdefault.jpg" / "mqdefault.jpg" / "sddefault.jpg"
+            // and so corrupted an already-good frame URL into
+            // "hqhqdefault.jpg" / "mqhqdefault.jpg" — a 404.
+            // That one bug blanked every hero card in
+            // v1.0.24-test: chart tracks carry i.ytimg frames
+            // that were already hqdefault. Matching the whole
+            // last path segment (anything ending in default.jpg)
+            // can never double a prefix, and it REPAIRS a
+            // corrupted URL stored by the old code just as well
+            // as it upgrades a clean one.
+            Regex("""/[^/]*default\.jpg"""),
+            "/hqdefault.jpg",
+        )
+        else -> u
+    }
+}
+
+/** The display slot an artwork URL is fetched for (v1.0.24-test,
+ * the poster-speed fix). [bigArtwork] asks every source for its
+ * largest form — right for the player, wasteful for a 56dp row:
+ * a w1080 cover is ~10× the bytes of the w240 the row can show,
+ * and on a slow connection that is the difference between a
+ * poster that is simply THERE and one that fades in late over a
+ * letter tile. Display sites now name their slot and the URL is
+ * re-sized from its base form:
+ *  - googleusercontent/ggpht: the `=w…` suffix is rewritten.
+ *  - iTunes (mzstatic): the `…x…bb.jpg` size is rewritten.
+ *  - i.ytimg frames: the standard frame for the slot steps up
+ *    (mq for rows, hq for cards and up — maxres is not
+ *    guaranteed to exist, hq always is). A frame already
+ *    resolved to maxres at parse (chart tracks — see
+ *    ArtworkResolver.maxresFrame) is the HERO rung's best
+ *    form and is kept as-is there; smaller rungs still step
+ *    it down like any other frame.
+ * Hero and player keep the largest forms (w1080 / 1200bb). */
+enum class ArtSize { ROW, CARD, HERO }
+
+fun artworkAt(url: String?, size: ArtSize): String? {
+    val u = url?.takeIf { it.isNotBlank() } ?: return null
+    return when {
+        u.contains("googleusercontent.com") || u.contains("ggpht.com") -> {
+            val base = u.substringBefore("=")
+            val w = when (size) {
+                ArtSize.ROW -> 240
+                ArtSize.CARD -> 540
+                ArtSize.HERO -> 1080
+            }
+            "$base=w$w-h$w-l90-rj"
+        }
+        u.contains("mzstatic.com") -> {
+            val px = when (size) {
+                ArtSize.ROW -> 200
+                ArtSize.CARD -> 600
+                ArtSize.HERO -> 1200
+            }
+            u.replace(Regex("""\d+x\d+bb\.jpg"""), "${px}x${px}bb.jpg")
+        }
+        u.contains("i.ytimg.com") -> {
+            // A frame already resolved to maxres (v1.0.26-test:
+            // chart tracks resolve once at parse — see
+            // ArtworkResolver.maxresFrame) IS the hero's best
+            // form: the HERO rung keeps it untouched. Smaller
+            // rungs still step it down like any other frame.
+            if (size == ArtSize.HERO && u.contains("maxresdefault.jpg")) {
+                return u
+            }
+            val frame = when (size) {
+                ArtSize.ROW -> "mqdefault.jpg"
+                ArtSize.CARD, ArtSize.HERO -> "hqdefault.jpg"
+            }
+            u.replace(
+                // Whole filename segment, as in [bigArtwork]:
+                // the old anchored-alternatives regex matched
+                // the "hqdefault.jpg" INSIDE a corrupted
+                // "hqhqdefault.jpg" and rewrote it to itself,
+                // leaving the 404 in place. Matching the entire
+                // last segment repairs corrupted URLs persisted
+                // by the old parse (history / favorites /
+                // playlists / downloads rows) on read, so no
+                // saved row keeps a dead poster.
+                Regex("""/[^/]*default\.jpg"""),
+                "/$frame",
+            )
+        }
         else -> u
     }
 }

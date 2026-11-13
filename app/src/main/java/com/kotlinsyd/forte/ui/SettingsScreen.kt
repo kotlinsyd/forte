@@ -890,10 +890,12 @@ fun SettingsScreen(
                 Text(
                     "Version ${BuildConfig.VERSION_NAME}",
                     fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
                 Text(
                     "Made by Kotlinsyd",
                     fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ForteColors.Red,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
                 TextButton(
                     onClick = {
@@ -907,12 +909,22 @@ fun SettingsScreen(
                         }
                     },
                 ) {
-                    Text("GitLab", color = ForteColors.TextDim, fontSize = 12.sp)
+                    Text(
+                        "GitLab", color = ForteColors.TextDim, fontSize = 12.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
                 }
                 Spacer(Modifier.height(4.dp))
+                // The note (owner, 2026-11-13): the full meaning
+                // in one tight sentence — music from YouTube, no
+                // account needed, signing in optional — centred
+                // like every line in this block (a wrapped Text
+                // left-aligns its lines by default, which is why
+                // the old two-sentence note read off-centre).
                 Text(
-                    "Music plays from YouTube. No account needed — signing in is optional.",
+                    "Music plays from YouTube — no account needed, signing in is optional.",
                     fontSize = 12.sp, color = ForteColors.TextDim,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
             }
             Spacer(Modifier.height(28.dp + LocalDockClearance.current))

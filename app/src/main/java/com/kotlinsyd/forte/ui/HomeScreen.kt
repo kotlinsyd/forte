@@ -34,7 +34,9 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -63,6 +65,12 @@ import com.kotlinsyd.forte.data.formatViews
 import kotlinx.coroutines.launch
 
 
+/** Home's freshness window (v1.0.21): a saved catalogue younger
+ * than this is trusted as-is when Home resumes — no refetch. A
+ * pull-to-refresh always fetches, stamp or no stamp. */
+private const val STALE_MS = 3 * 3600 * 1000L
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     actions: TrackActions,
@@ -133,7 +141,40 @@ fun HomeScreen(
     }
     var homeFailed by remember { mutableStateOf(false) }
     var loadedKey by remember { mutableStateOf("") }
-    LaunchedEffect(settings.regionGl, settings.regionChosen, accountTick) {
+    // Auto-refresh (v1.0.21): Home's effects used to re-run only
+    // when the region or account changed, so a process that stayed
+    // alive served the first catalogue it ever loaded — for days.
+    // A resume tick now re-runs both effects on every return; each
+    // run trusts a cache younger than STALE_MS and skips the
+    // network, and a pull (forceTick) always fetches. The handled
+    // markers remember which force each effect already served, so
+    // a plain resume never mistakes an old pull for a new one.
+    var resumeTick by remember { mutableStateOf(0) }
+    var forceTick by remember { mutableStateOf(0) }
+    var isRefreshing by remember { mutableStateOf(false) }
+    var handledHomeForce by remember { mutableStateOf(0) }
+    var handledChartsForce by remember { mutableStateOf(0) }
+    DisposableEffect(context) {
+        val activity = generateSequence(context) {
+            (it as? android.content.ContextWrapper)?.baseContext
+        }.filterIsInstance<androidx.activity.ComponentActivity>().firstOrNull()
+        if (activity == null) {
+            onDispose { }
+        } else {
+            var replayed = false
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                    // Registering replays the current state once:
+                    // that first ON_RESUME is composition itself,
+                    // not a return — only later resumes count.
+                    if (replayed) resumeTick++ else replayed = true
+                }
+            }
+            activity.lifecycle.addObserver(observer)
+            onDispose { activity.lifecycle.removeObserver(observer) }
+        }
+    }
+    LaunchedEffect(settings.regionGl, settings.regionChosen, accountTick, resumeTick, forceTick) {
         val region = app.settings.region()
         val key = com.kotlinsyd.forte.data.HomeCache.key(region.gl, signedIn)
         if (key != loadedKey) {
@@ -153,6 +194,19 @@ fun HomeScreen(
             }
         }
         homeFailed = false
+        // Freshness gate (v1.0.21): a run that finds this key's
+        // cache younger than STALE_MS trusts what it just painted
+        // and skips the network entirely. A forced run (a pull)
+        // always fetches; its marker is recorded as the fetch
+        // starts, so the run itself is the one that serves it.
+        val forcedHome = forceTick != handledHomeForce
+        if (!forcedHome && cached != null && cached.savedAt > 0 &&
+            System.currentTimeMillis() - cached.savedAt < STALE_MS
+        ) {
+            isRefreshing = false
+            return@LaunchedEffect
+        }
+        if (forcedHome) handledHomeForce = forceTick
         val watchdog = launch {
             kotlinx.coroutines.delay(6_000)
             if (homeShelves.isNullOrEmpty()) {
@@ -180,6 +234,11 @@ fun HomeScreen(
         }.onFailure {
             if (homeShelves.isNullOrEmpty()) homeFailed = true
         }
+        // The pull spinner answers to the feed fetch: it clears
+        // when the fetch settles, success or failure (a background
+        // run landing here with the spinner somehow up clears it
+        // too — it is only ever up during a pull).
+        isRefreshing = false
         watchdog.cancel()
         // Home supplements — the same extra wells the Home feed
         // merges in (new releases, explore, mixed for
@@ -205,8 +264,23 @@ fun HomeScreen(
     // once with a US-default search and never again). Region-true
     // charts come from FEmusic_charts with the picked country; the
     // extractor search is only the fallback lane.
-    LaunchedEffect(settings.regionGl, accountTick) {
+    LaunchedEffect(settings.regionGl, accountTick, resumeTick, forceTick) {
         chartsFailed = false
+        // The same freshness gate as the feed effect (v1.0.21):
+        // charts ride the same HomeCache payload, so the same
+        // stamp decides. A forced run always fetches.
+        val forcedCharts = forceTick != handledChartsForce
+        if (!forcedCharts) {
+            val gateCached = com.kotlinsyd.forte.data.HomeCache.load(
+                context, app.settings.region().gl, signedIn,
+            )
+            if (gateCached != null && gateCached.savedAt > 0 &&
+                System.currentTimeMillis() - gateCached.savedAt < STALE_MS
+            ) {
+                return@LaunchedEffect
+            }
+        }
+        if (forcedCharts) handledChartsForce = forceTick
         runCatching { com.kotlinsyd.forte.data.YtAccount.charts() }
             .onSuccess { res ->
                 if (res.tracks.isNotEmpty()) {
@@ -338,6 +412,18 @@ fun HomeScreen(
     // black, and a tinted wash behind it would colour that
     // black.)
     Box(Modifier.fillMaxSize()) {
+    // Pull-to-refresh (v1.0.21): wraps ONLY the scrolling list —
+    // the fixed header below stays outside, floating as it always
+    // has. A pull bumps forceTick; the feed effect's forced run
+    // is what actually fetches, and its settle clears the spinner.
+    PullToRefreshBox(
+        isRefreshing = isRefreshing,
+        onRefresh = {
+            isRefreshing = true
+            forceTick++
+        },
+        modifier = Modifier.fillMaxSize(),
+    ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         // Invisible end clearance — the list itself scrolls
@@ -664,6 +750,7 @@ fun HomeScreen(
             }
         }
 
+    }
     }
         // The header zone (owner-approved hero design,
         // v1.0.28-test): the wordmark + region line + account

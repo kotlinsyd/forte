@@ -227,12 +227,17 @@ object LastGood {
 
 /** Home's last-good payload: the full shelf set + charts for one
  * region and sign-in state. A region change reads a different key,
- * so the previous region's content can never pose as the new one. */
+ * so the previous region's content can never pose as the new one.
+ * [Cached.savedAt] is the wall-clock moment save() wrote the
+ * payload (v1.0.21); payloads saved before the stamp existed read
+ * as 0 — as old as possible, so they count as stale and the next
+ * Home run refetches instead of trusting them. */
 object HomeCache {
     data class Cached(
         val shelves: List<YtAccount.HomeShelf>,
         val charts: List<Track>,
         val chartsLabel: String?,
+        val savedAt: Long = 0,
     )
 
     fun key(gl: String, signedIn: Boolean): String =
@@ -275,6 +280,7 @@ object HomeCache {
                 shelves = shelves,
                 charts = charts,
                 chartsLabel = root.optString("chartsLabel").takeIf { it.isNotBlank() },
+                savedAt = root.optLong("savedAt", 0),
             )
         }.getOrNull()
     }
@@ -313,6 +319,7 @@ object HomeCache {
             charts.forEach { chArr.put(it.toJson()) }
             root.put("charts", chArr)
             root.put("chartsLabel", chartsLabel ?: JSONObject.NULL)
+            root.put("savedAt", System.currentTimeMillis())
             LastGood.put(context, key(gl, signedIn), root.toString())
         }
     }

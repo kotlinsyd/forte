@@ -333,9 +333,25 @@ fun HomeScreen(
     // history. While charts are still loading there is no hero
     // — it joins when they land and never holds the page up.
     // No source, no hero (never a broken hero).
-    val heroTracks: List<Track> = remember(charts, homeShelves, history, chartsFailed) {
+    // Hero window rotation (v1.0.22): the hero still carries
+    // ONLY chart hits (owner's rule), but a chart's top 8 barely
+    // moves day to day, so the hero looked frozen even when Home
+    // truly refreshed. The window now walks the chart's top 20
+    // by day — every hero track is still a top-20 chart hit in
+    // chart order, and the featured set turns over daily and
+    // whenever the chart itself moves.
+    val heroDay = (System.currentTimeMillis() / 86_400_000L).toInt()
+    val heroTracks: List<Track> = remember(charts, homeShelves, history, chartsFailed, heroDay) {
         when {
-            !charts.isNullOrEmpty() -> charts.orEmpty().take(8)
+            !charts.isNullOrEmpty() -> {
+                val pool = charts.orEmpty().take(20)
+                if (pool.size > 8) {
+                    val start = heroDay % (pool.size - 7)
+                    pool.drop(start).take(8)
+                } else {
+                    pool
+                }
+            }
             chartsFailed || charts != null -> {
                 val mixed = homeShelves
                     ?.firstOrNull { it.title.contains("Mixed", ignoreCase = true) }
@@ -420,6 +436,11 @@ fun HomeScreen(
         isRefreshing = isRefreshing,
         onRefresh = {
             isRefreshing = true
+            // A pull must be able to bring a NEW home, not the
+            // same feed re-served to the same visitor: rotate
+            // the guest visitor BEFORE the forced run starts,
+            // so its fetches compose a fresh feed (v1.0.22).
+            com.kotlinsyd.forte.data.YtAccount.rotateGuestVisitor()
             forceTick++
         },
         modifier = Modifier.fillMaxSize(),

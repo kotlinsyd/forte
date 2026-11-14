@@ -211,6 +211,24 @@ object YtAccount {
     }
 
     /**
+     * Pull-to-refresh rotation (v1.0.22): a pull is the user
+     * ordering a NEW answer, but the home feed is composed for
+     * the visitor identity every request carries — an identity
+     * adopted from each response and reused for the process's
+     * whole life, so a pull used to re-ask the same visitor and
+     * receive the same feed back. Dropping the anonymous
+     * visitor id makes the next request go out unbadged; the
+     * server seats a fresh visitor, composes a fresh feed, and
+     * post() adopts the new id from the answer as usual. A
+     * signed-in (session-bound) visitor is NEVER rotated — its
+     * id belongs to the account session.
+     */
+    fun rotateGuestVisitor() {
+        if (visitorSessionBound) return
+        visitorData = null
+    }
+
+    /**
      * The session's auth headers (Cookie + SAPISIDHASH), for reuse
      * by Forte's own stream engine so its player calls ride the same
      * signed-in session as the account calls. Empty when signed out

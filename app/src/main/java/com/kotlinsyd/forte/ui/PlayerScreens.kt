@@ -390,7 +390,10 @@ fun PlayerScreen(
         // gesture), so a drag frame costs a measure of
         // this subtree plus texture draws, never a
         // recomposition of the screen.
-        val sheetShape = RoundedCornerShape(topStart = 36.dp, topEnd = 36.dp)
+        val sheetShape = RoundedCornerShape(
+            topStart = ForteGlass.RadiusPlayerSheet,
+            topEnd = ForteGlass.RadiusPlayerSheet,
+        )
         val sheetExtra =
             (if (state.error != null) 50.dp else 0.dp) +
                 (if (sleepLabel != null) 28.dp else 0.dp)
@@ -2057,11 +2060,21 @@ private fun QueueSectionLabel(text: String) {
 private fun QueueToggle(label: String, active: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(50))
-            .background(if (active) ForteColors.Red else ForteColors.SurfaceHi)
+            .then(
+                if (active) {
+                    Modifier
+                        .clip(RoundedCornerShape(ForteGlass.RadiusCapsule))
+                        .background(Color.White)
+                } else {
+                    Modifier.forteGlassChip(RoundedCornerShape(ForteGlass.RadiusCapsule))
+                },
+            )
             .clickable { onClick() }
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
-        Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+        Text(
+            label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            color = if (active) Color.Black else Color.White,
+        )
     }
 }

@@ -12,9 +12,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.GraphicsLayer
@@ -22,9 +21,10 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /**
  * TRUE frosted glass without a blur library (none exists in the
@@ -82,20 +82,42 @@ import kotlin.math.roundToInt
  * at draw time, translates and draws its blur layer. The
  * content layer itself never carries an effect.
  *
- * v1.0.30-test adds the CAPSULE layer alongside: the audit
- * for the owner's fourth "still readable" verdict found
- * Forte's dock/mini already passed MORE than Plavio on
- * both paper levers — a 40dp radius converted to ~120px at
- * 3x density (Plavio: 22dp ≈ 66px) under a 0.80 tint
- * (Plavio: 0.50) — yet glyphs survived on his phone while
- * Plavio's read frosted. More radius into the same
- * full-resolution RenderEffect pipeline was never going to
- * fix that. So the two bottom capsules no longer sample a
- * full-size blur layer at all: [recordBackdrop] also
- * records the page DOWNSCALED (~176px wide) with a blur,
- * and [capsuleGlassBackdrop] draws that miniature back up.
- * Text dies in the rasterization itself — see
- * [CapsuleBackdropWidthPx].
+ * v1.0.30-test added the CAPSULE layer alongside: after the
+ * owner's fourth "still readable" verdict, the two bottom
+ * capsules stopped sampling a full-size blur layer and instead
+ * sampled the page recorded DOWNSCALED (~176px wide) with a
+ * blur, drawn back up — text died in the rasterization itself.
+ *
+ * v1.0.39-test retires the downscale (owner's order, against
+ * his own screenshot of Plavio's capsule: "make liquid glass
+ * same to same like ss capsule" — the screenshot wins over
+ * every constant Forte carried). The audit this time found
+ * the units bug the earlier rounds missed: every full-size
+ * radius Forte ever fed its blur pipeline was a RAW PIXEL
+ * float handed straight to createBlurEffect (26f default,
+ * 44f at the widest ≈ 9–15dp at 3x density), while Plavio's
+ * 22dp is converted through the density (≈66px at 3x) before
+ * it reaches its BlurEffect. Forte's capsules never actually
+ * ran Plavio-strength blur at full resolution. The capsule
+ * layer is now Plavio's arrangement verbatim: the page
+ * recorded at FULL size inside the content's own draw, one
+ * dedicated layer carrying a pure BlurEffect of
+ * [CapsuleBlurRadiusDp] converted in the draw scope, no
+ * saturation chain, no scale — [capsuleGlassBackdrop] only
+ * translates and draws it, exactly as Plavio's dock does.
+ *
+ * v1.0.40-test thickens that frost (owner's order: "Glass of
+ * capsules make thick frosted, thick means thick" —
+ * corrected the same round: "Not milky white. Blur frosted
+ * dark"). The owner still read the .39 capsule as thin, so
+ * the material — not the arrangement — changes: the capsule
+ * layer now carries TWO chained BlurEffect passes of 44dp
+ * each (double Plavio's 22dp per pass; Gaussian passes add
+ * in quadrature, ≈62dp effective) so backdrop detail fully
+ * dissolves — blurred shapes only, no readable text or image
+ * edges survive, even over bright artwork. The tint half of
+ * the thickness lives in Components.kt's capsuleTint (0.50 →
+ * 0.68 black, a deeper DARK sheet — no whitening anywhere).
  */
 class BackdropState internal constructor(
     val layer: GraphicsLayer,
@@ -112,16 +134,15 @@ class BackdropState internal constructor(
      */
     internal val blurLayers = mutableStateListOf<Pair<Float, GraphicsLayer>>()
 
-    /**
-     * Scale of [capsuleLayer] relative to the full-size
-     * content layer (v1.0.30-test): the capsule backdrop is
-     * recorded DOWNSCALED — about [CapsuleBackdropWidthPx]
-     * pixels wide — and drawn scaled back up by
-     * [capsuleGlassBackdrop]. Written by [recordBackdrop] on
-     * every record; read by consumers at draw time.
+    /*
+     * The capsule blur layer ([capsuleLayer]): the page
+     * recorded at FULL size with the thick-frost effect —
+     * two chained 44dp BlurEffect passes (v1.0.40-test; .39
+     * carried Plavio's single 22dp pass — see the file
+     * header). Recorded by [recordBackdrop] inside the
+     * content's own draw; the two bottom capsules only ever
+     * translate and draw it ([capsuleGlassBackdrop]).
      */
-    var capsuleScale: Float by mutableStateOf(1f)
-        internal set
 
     /**
      * Freeze (v1.0.30-test): while true, [recordBackdrop]
@@ -154,26 +175,60 @@ fun rememberBackdropState(): BackdropState {
 val backdropBlurSupported: Boolean get() = Build.VERSION.SDK_INT >= 31
 
 /**
- * The capsule backdrop's recorded width (v1.0.30-test).
- * On a 1080px-wide phone the stage is recorded at ~176px
- * wide — a ~6.1x downscale — so the sharpest page text
- * (14sp ≈ 42px tall at 3x density) lands in the capsule
- * layer about 7px tall, is blurred there, and is drawn
- * back up 6.1x. No glyph survives that round trip, on any
- * device blur implementation — the illegibility is a
- * property of the rasterization, not of the blur filter.
+ * The capsule layer's blur radius (v1.0.40-test value,
+ * kept as the reference): 44dp — double Plavio's 22dp —
+ * converted through the density in the draw scope before
+ * it reaches the effect (≈132px at 3x). v1.0.40-test
+ * applied it as TWO chained passes at full size, ≈62dp
+ * effective; v1.0.41-test derives its single half-size
+ * pass from this same constant (44/√2 ≈ 31dp in layer
+ * space, presented at 2× — see [recordBackdrop]) so the
+ * frost the owner approved is unchanged, only cheaper.
+ * v1.0.39-test ran a single 22dp pass (Plavio's own value,
+ * its MainActivity does `22.dp.toPx()` on its blur layer);
+ * the owner still read that capsule as thin and ordered
+ * the frost THICK — "thick means thick" — so the radius
+ * doubled and the pass doubled with it. Every radius
+ * Forte fed this pipeline before .39 was a raw pixel
+ * float (26f/44f ≈ 9–15dp), a third of Plavio's at best;
+ * see the file header for the full audit.
  */
-private const val CapsuleBackdropWidthPx = 176f
+private const val CapsuleBlurRadiusDp = 44f
 
 /**
- * The blur the capsule layer would need at FULL resolution
- * to match the small layer's blur (v1.0.30-test): the small
- * layer's actual radius is this times [BackdropState.capsuleScale]
- * (~18px on the 176px-wide layer at 3x density, ≡ ~110px
- * at full size — and the 6.1x downscale-upscale mushes
- * what's left on top of it).
+ * The vibrancy of the glass pipeline (v1.0.37-test): the
+ * sampled backdrop's saturation, lifted before the blur.
+ * BitChord's liquid glass runs its colour controls at
+ * saturation 1 + 0.5 × vibrancy(1) = 1.5 — the colours
+ * behind a bar arrive richer than the page itself, which
+ * is most of what makes the surface read as GLASS rather
+ * than as a dark smudge (the v1.0.36-test build kept the
+ * blur but not the vibrancy, and its tint was heavy enough
+ * to read flat). Same value here, Forte's own chain.
  */
-private const val CapsuleBackdropFullRadiusPx = 110f
+private const val GlassSaturation = 1.5f
+
+/**
+ * One recorded-backdrop effect: saturation first, then
+ * blur, chained in the platform effect language and handed
+ * back to Compose (API 31+ — every caller is already behind
+ * [backdropBlurSupported]). Saturation-then-blur matches
+ * the reference pipeline's order (colour controls, then
+ * blur): the blur mixes already-lifted colours.
+ */
+private fun glassRenderEffect(radius: Float): androidx.compose.ui.graphics.RenderEffect {
+    val saturation = android.graphics.RenderEffect.createColorFilterEffect(
+        android.graphics.ColorMatrixColorFilter(
+            android.graphics.ColorMatrix().apply { setSaturation(GlassSaturation) },
+        ),
+    )
+    val blur = android.graphics.RenderEffect.createBlurEffect(
+        radius, radius, android.graphics.Shader.TileMode.CLAMP,
+    )
+    return android.graphics.RenderEffect
+        .createChainEffect(blur, saturation)
+        .asComposeRenderEffect()
+}
 
 /** Record this content into [state]'s layer as it draws — and,
  * in the same draw pass, record every registered blur layer
@@ -192,41 +247,56 @@ fun Modifier.recordBackdrop(state: BackdropState): Modifier = this
             // BlurEffect on the blur layer itself. Consumers
             // later draw the slice behind them by translation.
             state.blurLayers.forEach { (radius, blurLayer) ->
-                blurLayer.renderEffect = BlurEffect(radius, radius, TileMode.Clamp)
+                blurLayer.renderEffect = glassRenderEffect(radius)
                 blurLayer.record {
                     drawLayer(state.layer)
                 }
             }
-            // The capsule backdrop (v1.0.30-test): the same
-            // page recorded a second time, DOWNSCALED to
-            // ~[CapsuleBackdropWidthPx] wide with its own
-            // blur, for the two bottom capsules (dock +
-            // mini-player) — see [CapsuleBackdropWidthPx]
-            // for why the frost now comes from scale, not
-            // from ever-bigger radii. One tiny recording
-            // replaces the two full-screen blur layers those
-            // capsules used to register, so this is cheaper
-            // than what it replaces, not costlier.
-            val fullW = size.width
-            val fullH = size.height
-            if (fullW > 0f && fullH > 0f) {
-                val downScale = (CapsuleBackdropWidthPx / fullW).coerceIn(0.05f, 0.30f)
-                val smallSize = IntSize(
-                    (fullW * downScale).roundToInt().coerceAtLeast(1),
-                    (fullH * downScale).roundToInt().coerceAtLeast(1),
-                )
-                // The effective scale after integer rounding —
-                // recorder and consumers share this one number,
-                // so the drawn picture stays aligned.
-                val effectiveScale = smallSize.width / fullW
-                state.capsuleScale = effectiveScale
-                val smallRadius = CapsuleBackdropFullRadiusPx * effectiveScale
-                state.capsuleLayer.renderEffect =
-                    BlurEffect(smallRadius, smallRadius, TileMode.Clamp)
+            // The capsule backdrop (v1.0.41-test): the same
+            // page recorded a second time into its own layer,
+            // carrying the THICK frost — but recorded at HALF
+            // size and blurred in ONE pass, where v1.0.40-test
+            // recorded FULL size and chained TWO 44dp passes.
+            // The owner read .40's scroll as flickery/unsmooth:
+            // the capsule layer re-records from the content
+            // layer on every content invalidation (i.e. every
+            // scroll frame), and .40's full-res record + two
+            // chained full-res blur passes was the per-frame
+            // cost. At this frost's strength the backdrop
+            // behind the blur holds no detail finer than the
+            // blur itself, so half resolution is visually
+            // indistinguishable: the layer records at
+            // (w/2 × h/2) with the content drawn scaled 0.5,
+            // one BlurEffect pass of 44/√2 ≈ 31dp IN LAYER
+            // SPACE — which the consumer's 2× upscale presents
+            // as the same ≈62dp effective frost .40's chain
+            // produced (two chained 44dp passes add in
+            // quadrature to ≈62dp). Tint, rim and pill are
+            // untouched — only the price changed: a quarter of
+            // the pixels, half the passes. The two bottom
+            // capsules (dock + mini-player) sample this layer
+            // and nothing else; see the file header for why
+            // the v1.0.30 downscale retired (that one scaled
+            // the DRAW of a full-size layer and shrank the
+            // picture with it — this scales the RECORDING, and
+            // the consumer scales the layer back up, so the
+            // geometry is identical).
+            val capsuleRadiusPx = (CapsuleBlurRadiusDp / sqrt(2f)).dp.toPx()
+            val capsuleBlur = android.graphics.RenderEffect.createBlurEffect(
+                capsuleRadiusPx,
+                capsuleRadiusPx,
+                android.graphics.Shader.TileMode.CLAMP,
+            )
+            state.capsuleLayer.renderEffect = capsuleBlur.asComposeRenderEffect()
+            val contentSize = state.layer.size
+            if (contentSize.width > 0 && contentSize.height > 0) {
                 state.capsuleLayer.record(
-                    drawContext.density, layoutDirection, smallSize,
+                    IntSize(
+                        (contentSize.width / 2f).roundToInt(),
+                        (contentSize.height / 2f).roundToInt(),
+                    ),
                 ) {
-                    scale(effectiveScale, effectiveScale, Offset.Zero) {
+                    scale(0.5f, 0.5f, Offset.Zero) {
                         drawLayer(state.layer)
                     }
                 }
@@ -275,18 +345,25 @@ fun Modifier.glassBackdrop(
 }
 
 /**
- * The CAPSULE variant of [glassBackdrop] (v1.0.30-test):
- * draws [BackdropState.capsuleLayer] — the downscaled,
- * blurred recording — behind this element, scaled back up
- * by 1/[BackdropState.capsuleScale] and translated so the
- * picture lines up with what's really behind the element,
- * exactly as [glassBackdrop] aligns its full-size layer.
- * Only the two bottom capsules (the dock in GlassBox's
- * capsule branch, and the mini-player) sample this layer:
- * they are the surfaces the owner demands be unreadable-
- * through ("blur it frosted, thick, so cant read whats
- * backside"). Every other glass surface keeps the
- * full-size [glassBackdrop] path untouched.
+ * The CAPSULE variant of [glassBackdrop]: draws
+ * [BackdropState.capsuleLayer] — the THICK-frost recording
+ * of the page (v1.0.41-test: recorded at half size with a
+ * single ≈31dp layer-space blur pass and drawn scaled 2×,
+ * presenting the same ≈62dp effective frost as
+ * v1.0.40-test's full-size two-pass chain) — behind this
+ * element, translated so the picture lines up with what's
+ * really behind the element, exactly as [glassBackdrop]
+ * aligns its full-size layer and exactly as Plavio's dock
+ * draws its blur layer. Only the two bottom capsules (the
+ * dock in GlassBox's capsule branch, and the mini-player)
+ * sample this layer. (v1.0.30–v1.0.38 this drew a
+ * DOWNSCALED miniature of the page instead; the owner's
+ * same-to-same order against his Plavio screenshot retired
+ * it — see the file header. v1.0.41's half-size RECORDING
+ * is a different mechanism: the layer is drawn back at
+ * full size, so nothing about the picture changes.) Every
+ * other glass surface keeps the full-size [glassBackdrop]
+ * path untouched.
  */
 @Composable
 fun Modifier.capsuleGlassBackdrop(
@@ -299,12 +376,17 @@ fun Modifier.capsuleGlassBackdrop(
         .onGloballyPositioned { pos = it.positionInRoot() }
         .clip(shape)
         .drawWithContent {
-            val s = state.capsuleScale
             translate(
                 left = -(pos.x - state.contentOrigin.x),
                 top = -(pos.y - state.contentOrigin.y),
             ) {
-                scale(1f / s, 1f / s, Offset.Zero) {
+                // v1.0.41-test: the capsule layer is recorded at
+                // HALF size (see recordBackdrop); scale it back
+                // up inside the same translation. A layer point
+                // q = p/2 lands at 2q − (pos − origin) =
+                // p − (pos − origin) — the same alignment the
+                // full-size layer had in v1.0.40-test.
+                scale(2f, 2f, Offset.Zero) {
                     drawLayer(state.capsuleLayer)
                 }
             }

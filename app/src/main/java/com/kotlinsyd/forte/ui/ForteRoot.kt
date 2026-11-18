@@ -4,6 +4,8 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -54,8 +56,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
@@ -266,6 +272,47 @@ fun ForteRoot() {
     // the dock and mini strip blur it live behind themselves.
     val backdrop = rememberBackdropState()
 
+    // Dock shrink (v1.0.38-test — Plavio's "Glass Shrink",
+    // ported on the owner's order, its MainActivity shell
+    // copied mechanism-for-mechanism): a hysteresis latch on
+    // the shell's nested scroll — a clear scroll DOWN (content
+    // moving up, available.y < −10) folds the capsule, a clear
+    // scroll UP (available.y > 10) unfolds it, and nothing in
+    // between moves it, so the capsule never dances. One
+    // Animatable on Plavio's own spring (dampingRatio 0.92,
+    // stiffness 205) drives the fold CapsuleDock renders:
+    // width × (1 − 0.15·fold), height 62 − 15·fold, tab names
+    // eaten. v1.0.39-test: the SAME fold value also drives
+    // the mini-player strip above the dock (its width
+    // fraction + its internal height fold — see MiniPlayer),
+    // on the owner's order that the player capsule shrink
+    // with the dock capsule, same way; with no song playing
+    // there is no strip and the dock fold is unchanged. The connection consumes NOTHING (returns
+    // Offset.Zero), so every page scrolls exactly as before;
+    // it hangs on the content stage below, so EVERY tab's
+    // scroll drives it, the way Plavio's shell connection
+    // wraps its whole content box.
+    var compactDock by remember { mutableStateOf(false) }
+    val dockFoldAnim = remember { Animatable(0f) }
+    LaunchedEffect(compactDock) {
+        dockFoldAnim.animateTo(
+            targetValue = if (compactDock) 1f else 0f,
+            animationSpec = spring(dampingRatio = 0.92f, stiffness = 205f),
+        )
+    }
+    val dockScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(
+                available: Offset,
+                source: NestedScrollSource,
+            ): Offset {
+                if (available.y < -10) compactDock = true
+                else if (available.y > 10) compactDock = false
+                return Offset.Zero
+            }
+        }
+    }
+
     LaunchedEffect(playState.current == null) {
         if (playState.current == null) {
             sheet.reset()
@@ -317,6 +364,7 @@ fun ForteRoot() {
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .nestedScroll(dockScrollConnection)
                 .recordBackdrop(backdrop),
         ) {
             androidx.compose.runtime.CompositionLocalProvider(
@@ -590,7 +638,11 @@ fun ForteRoot() {
                 // itself above the navigation-bar area while content
                 // flows behind it to the physical edge.
                 .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
+                // Side margins are Plavio's dock seat
+                // (v1.0.39-test): 16dp each side, so the two
+                // bars span exactly the width Plavio's capsule
+                // spans (its MainActivity dock padding).
+                .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
             if (miniVisible) {
                 // The collapsed state of the player sheet. It keeps its
@@ -612,6 +664,13 @@ fun ForteRoot() {
                             orientation = Orientation.Vertical,
                             onDragStopped = { velocity -> sheet.settle(velocity) },
                         ),
+                    // The strip folds WITH the dock (v1.0.39-test):
+                    // centred in its full-width seat so its fold
+                    // narrowing (the dock's own × (1 − 0.15·fold))
+                    // closes from both sides, like the capsule
+                    // below it. The seat itself — this box, its
+                    // measured top, the drag — never moves.
+                    contentAlignment = Alignment.Center,
                 ) {
                     MiniPlayer(
                         state = playState,
@@ -619,8 +678,9 @@ fun ForteRoot() {
                         onTap = { sheet.expand() },
                         onTogglePlay = { controller.togglePlayPause() },
                         onNext = { controller.next(manual = true) },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth(1f - 0.15f * dockFoldAnim.value),
                         backdrop = backdrop,
+                        fold = dockFoldAnim.value,
                     )
                 }
                 Spacer(Modifier.height(10.dp))
@@ -648,6 +708,7 @@ fun ForteRoot() {
                 glass = settings.glassEffects,
                 modifier = Modifier.fillMaxWidth(),
                 backdrop = backdrop,
+                fold = dockFoldAnim.value,
             )
         }
 
@@ -907,8 +968,7 @@ fun ForteRoot() {
     ) {
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(ForteColors.SurfaceHi)
+                .forteGlassChip(RoundedCornerShape(ForteGlass.RadiusCapsule))
                 .padding(horizontal = 18.dp, vertical = 10.dp),
         ) {
             Text(userMsg ?: "", color = Color.White, fontSize = 13.sp)

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Data-extraction exclusions (v1.0.37-test, the owed S3 fix):
+  same rule as backup_rules.xml, for Android 12+ cloud backup
+  and device-to-device transfer — the settings store (account
+  identity for the signed-in session) never leaves the device
+  through either channel.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="forte_settings.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="forte_settings.xml" />
+    </device-transfer>
+</data-extraction-rules>

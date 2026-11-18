@@ -1,6 +1,7 @@
 package com.kotlinsyd.forte.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -47,9 +48,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -156,7 +159,12 @@ fun LibraryScreen(
             Column(
                 modifier = Modifier
                     .padding(horizontal = 20.dp)
-                    .clip(RoundedCornerShape(22.dp))
+                    .shadow(
+                        ForteGlass.ShadowElevation,
+                        RoundedCornerShape(ForteGlass.RadiusPanel),
+                        clip = false,
+                    )
+                    .clip(RoundedCornerShape(ForteGlass.RadiusPanel))
                     .background(
                         Brush.horizontalGradient(
                             listOf(
@@ -164,6 +172,10 @@ fun LibraryScreen(
                                 ForteColors.Surface,
                             ),
                         ),
+                    )
+                    .border(
+                        1.dp, ForteGlass.Hairline,
+                        RoundedCornerShape(ForteGlass.RadiusPanel),
                     )
                     .clickable { onOpenStats() }
                     .padding(18.dp),
@@ -251,9 +263,16 @@ fun LibraryScreen(
                 item {
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .background(
-                                if (downloadedOnly) ForteColors.Red else ForteColors.Surface,
+                            .then(
+                                if (downloadedOnly) {
+                                    Modifier
+                                        .clip(RoundedCornerShape(ForteGlass.RadiusCapsule))
+                                        .background(Color.White)
+                                } else {
+                                    Modifier.forteGlassChip(
+                                        RoundedCornerShape(ForteGlass.RadiusCapsule),
+                                    )
+                                },
                             )
                             .clickable { downloadedOnly = !downloadedOnly }
                             .padding(horizontal = 14.dp, vertical = 8.dp),
@@ -263,14 +282,14 @@ fun LibraryScreen(
                                 Icon(
                                     Icons.Filled.Check,
                                     contentDescription = null,
-                                    tint = Color.White,
+                                    tint = Color.Black,
                                     modifier = Modifier.padding(end = 5.dp),
                                 )
                             }
                             Text(
                                 "Downloaded",
                                 fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                                color = Color.White,
+                                color = if (downloadedOnly) Color.Black else Color.White,
                             )
                         }
                     }
@@ -424,8 +443,7 @@ fun LibraryScreen(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(18.dp))
-                                .background(ForteColors.Surface)
+                                .forteGlassPanel(RoundedCornerShape(ForteGlass.RadiusCard))
                                 .clickable { onOpenLogin() }
                                 .padding(16.dp),
                         ) {
@@ -511,8 +529,7 @@ fun LibraryScreen(
                 Column(
                     modifier = Modifier
                         .padding(horizontal = 20.dp)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(ForteColors.Surface)
+                        .forteGlassPanel(RoundedCornerShape(ForteGlass.RadiusCard))
                         .clickable { onOpenLogin() }
                         .padding(16.dp),
                 ) {
@@ -521,7 +538,7 @@ fun LibraryScreen(
                         fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color.White,
                     )
                     Text(
-                        "Sign in to add your liked songs, playlists and history. Forte works fine without it.",
+                        "Sign in to add your liked songs, playlists and history. Soniko works fine without it.",
                         fontSize = 12.sp, color = ForteColors.TextDim,
                     )
                 }
@@ -541,8 +558,7 @@ fun LibraryScreen(
                 )
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(ForteColors.SurfaceHi)
+                        .forteGlassChip(RoundedCornerShape(ForteGlass.RadiusCapsule))
                         .clickable { showImport = true }
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {
@@ -552,13 +568,13 @@ fun LibraryScreen(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .background(ForteColors.Red)
+                        .background(Color.White)
                         .clickable { showCreate = true }
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Add, contentDescription = "New playlist", tint = Color.White)
-                        Text("New", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Icon(Icons.Filled.Add, contentDescription = "New playlist", tint = Color.Black)
+                        Text("New", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.Black)
                     }
                 }
             }
@@ -672,8 +688,15 @@ private fun LibraryKindChip(
 ) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(50))
-            .background(if (selected) ForteColors.Red else ForteColors.Surface)
+            .then(
+                if (selected) {
+                    Modifier
+                        .clip(RoundedCornerShape(ForteGlass.RadiusCapsule))
+                        .background(Color.White)
+                } else {
+                    Modifier.forteGlassChip(RoundedCornerShape(ForteGlass.RadiusCapsule))
+                },
+            )
             .clickable { onClick() }
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
@@ -681,7 +704,7 @@ private fun LibraryKindChip(
             label,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
-            color = Color.White,
+            color = if (selected) Color.Black else Color.White,
         )
     }
 }
@@ -703,8 +726,7 @@ private fun LibraryCard(
     Column(
         modifier = modifier
             .heightIn(min = 108.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .background(ForteColors.Surface)
+            .forteGlassPanel(RoundedCornerShape(ForteGlass.RadiusCard))
             .clickable { onClick() }
             .padding(12.dp),
     ) {
@@ -871,10 +893,10 @@ fun PlaylistsListScreen(onOpenPlaylist: (Long) -> Unit, onBack: () -> Unit) {
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .background(ForteColors.Red)
+                        .background(Color.White)
                         .clickable { showCreate = true }
                         .padding(horizontal = 18.dp, vertical = 9.dp),
-                ) { Text("New playlist", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                ) { Text("New playlist", color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
                 Spacer(Modifier.width(10.dp))
                 Box(
                     modifier = Modifier
@@ -1044,7 +1066,17 @@ fun UserPlaylistScreen(
     var showDelete by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf("") }
 
-    Column(Modifier.fillMaxSize()) {
+    // The artwork palette (v1.0.37-test): a playlist page is
+    // a release page — it stands on the background tint
+    // derived from its own cover (see ArtworkPalette.kt),
+    // not on a blurred copy of the cover (the v1.0.36-test
+    // treatment) and not on plain black. The sharp cover
+    // and the text ride on the tint; the secondary lines
+    // take the tint's own pale hue.
+    val headerArt = rows.firstOrNull()?.toTrack()?.thumbUrl
+    val palette = rememberArtworkPalette(headerArt)
+
+    Column(Modifier.fillMaxSize().background(palette.background)) {
         ListHeader(playlist?.name ?: "Playlist", "${rows.size} songs", onBack) {
             Row(modifier = Modifier.padding(start = 12.dp, top = 4.dp)) {
                 TextButton(onClick = { showRename = true }) { Text("Rename", color = ForteColors.TextDim) }
@@ -1161,11 +1193,19 @@ fun YtPlaylistScreen(
             .onFailure { if (page == null) failed = true }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    // The artwork palette (v1.0.37-test): a playlist page is
+    // a release page — it stands on the background tint
+    // derived from its own cover (see ArtworkPalette.kt).
+    // While the page loads, the first track's cover stands
+    // in for the palette and the header alike.
+    val headerArt = page?.thumbUrl ?: page?.tracks?.firstOrNull()?.thumbUrl
+    val palette = rememberArtworkPalette(headerArt)
+
+    Column(Modifier.fillMaxSize().background(palette.background)) {
         // Artwork header (v1.0.14): a playlist page leads with its
         // cover — 132dp art, title/uploader/count beside it — not
-        // a bare text header. While the page loads, the first
-        // track's cover stands in.
+        // a bare text header.
+        val tracks = page?.tracks.orEmpty()
         Row(Modifier.padding(start = 8.dp, top = 10.dp)) {
             IconButton(onClick = onBack) {
                 Icon(
@@ -1174,35 +1214,34 @@ fun YtPlaylistScreen(
                 )
             }
         }
-        val tracks = page?.tracks.orEmpty()
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 6.dp),
+                .padding(horizontal = 16.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Artwork(
                 page?.thumbUrl ?: tracks.firstOrNull()?.thumbUrl,
                 page?.title ?: "Playlist",
-                132.dp, corner = 16.dp,
+                132.dp, corner = ForteGlass.RadiusArtwork,
             )
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     page?.title ?: "Playlist",
-                    fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                    style = ForteType.titleLarge, color = palette.onBackground,
                     maxLines = 2, overflow = TextOverflow.Ellipsis,
                 )
                 page?.uploader?.let { uploader ->
                     Text(
-                        uploader, fontSize = 13.sp, color = ForteColors.TextDim,
+                        uploader, fontSize = 13.sp, color = palette.onBackgroundVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                 }
                 if (tracks.isNotEmpty()) {
                     Text(
                         "${tracks.size} songs · ${formatDuration(tracks.sumOf { it.durationSec })}",
-                        fontSize = 13.sp, color = ForteColors.TextDim,
+                        fontSize = 13.sp, color = palette.onBackgroundVariant,
                     )
                 }
             }
@@ -1246,8 +1285,7 @@ fun YtPlaylistScreen(
                         ) {
                             Box(
                                 Modifier
-                                    .clip(RoundedCornerShape(50))
-                                    .background(ForteColors.SurfaceHi)
+                                    .forteGlassChip(RoundedCornerShape(ForteGlass.RadiusCapsule))
                                     .clickable {
                                         if (!loadingMore) {
                                             loadingMore = true

@@ -225,7 +225,7 @@ fun SettingsScreen(
                 root.put("playlists", plArr)
                 val cm = context.getSystemService(android.content.ClipboardManager::class.java)
                 cm?.setPrimaryClip(
-                    android.content.ClipData.newPlainText("Forte library backup", root.toString())
+                    android.content.ClipData.newPlainText("Soniko library backup", root.toString())
                 )
                 app.showMessage("Library backup copied — keep it somewhere safe.")
             }.onFailure { app.showMessage("Couldn't make the backup.") }
@@ -268,7 +268,7 @@ fun SettingsScreen(
                 }
                 app.showMessage("Backup restored — $added songs brought in.")
             }.onFailure {
-                app.showMessage("No Forte backup found on the clipboard.")
+                app.showMessage("No Soniko backup found on the clipboard.")
             }
         }
     }
@@ -300,7 +300,7 @@ fun SettingsScreen(
             SettingsRow(
                 icon = Icons.AutoMirrored.Filled.Logout,
                 title = "Sign out",
-                subtitle = "Forte keeps working without an account",
+                subtitle = "Soniko keeps working without an account",
                 value = null,
                 onClick = {
                     YtAccount.signOut()
@@ -497,7 +497,7 @@ fun SettingsScreen(
         SettingsRow(
             icon = Icons.Filled.Image,
             title = "Artwork cache",
-            subtitle = "Cover images Forte keeps for fast loading",
+            subtitle = "Cover images Soniko keeps for fast loading",
             value = imageCacheBytes?.let { com.kotlinsyd.forte.data.formatBytes(it) } ?: "…",
             onClick = {
                 scope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -550,7 +550,7 @@ fun SettingsScreen(
         SettingsRow(
             icon = Icons.Filled.ContentPaste,
             title = "Restore backup",
-            subtitle = "Reads a Forte backup from the clipboard",
+            subtitle = "Reads a Soniko backup from the clipboard",
             value = null,
             onClick = { importLibrary() },
         )
@@ -583,14 +583,14 @@ fun SettingsScreen(
         SettingsRow(
             icon = Icons.Filled.Update,
             title = "Check for updates",
-            subtitle = updateStatus ?: "See if a newer Forte is out",
+            subtitle = updateStatus ?: "See if a newer Soniko is out",
             value = null,
             onClick = {
                 updateStatus = "Checking…"
                 scope.launch {
                     when (val result = UpdateChecker.checkNow(context)) {
                         is UpdateChecker.Result.Update -> {
-                            updateStatus = "Forte ${result.info.version} is out"
+                            updateStatus = "Soniko ${result.info.version} is out"
                             updateInfo = result.info
                         }
                         UpdateChecker.Result.UpToDate ->
@@ -606,7 +606,7 @@ fun SettingsScreen(
         SettingsRow(
             icon = Icons.Filled.Description,
             title = "Open-source licenses",
-            subtitle = "What Forte is built with",
+            subtitle = "What Soniko is built with",
             value = null,
             onClick = { showLicenses = true },
         )
@@ -617,7 +617,7 @@ fun SettingsScreen(
         SettingsRow(
             icon = Icons.Filled.Forum,
             title = "Discord",
-            subtitle = "Join the Forte community",
+            subtitle = "Join the Soniko community",
             value = null,
             onClick = {
                 runCatching {
@@ -632,7 +632,7 @@ fun SettingsScreen(
         SettingsRow(
             icon = Icons.Filled.Coffee,
             title = "Ko-fi",
-            subtitle = "Support Forte on Ko-fi",
+            subtitle = "Support Soniko on Ko-fi",
             value = null,
             onClick = {
                 runCatching {
@@ -882,8 +882,8 @@ fun SettingsScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 androidx.compose.foundation.Image(
-                    painter = painterResource(R.drawable.forte_wordmark),
-                    contentDescription = "FORTE.",
+                    painter = painterResource(R.drawable.soniko_wordmark),
+                    contentDescription = "SONIKO.",
                     modifier = Modifier.height(26.dp),
                 )
                 Spacer(Modifier.height(12.dp))
@@ -1033,12 +1033,13 @@ fun SettingsScreen(
             title = { Text("Built with", color = Color.White) },
             text = {
                 Text(
-                    "Forte Engine — our own YouTube Music engine\n" +
+                    "Soniko Engine — our own YouTube Music engine\n" +
                         "Media3 / ExoPlayer (Apache 2.0) — playback\n" +
                         "Coil (Apache 2.0) — images\n" +
                         "Room & Jetpack Compose (Apache 2.0) — library and UI\n" +
                         "OkHttp (Apache 2.0) — networking\n" +
-                        "Lyrics by LRCLIB, a free community database.",
+                        "Lyrics by LRCLIB, a free community database.\n" +
+                        "App icon design: Vecteezy — vecteezy.com",
                     color = ForteColors.TextDim, fontSize = 13.sp,
                 )
             },
@@ -1066,7 +1067,7 @@ fun RegionPickerDialog(
         text = {
             Column {
                 Text(
-                    "Forte shows the YouTube Music home for your region.",
+                    "Soniko shows the YouTube Music home for your region.",
                     color = ForteColors.TextDim, fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(8.dp))
@@ -1115,9 +1116,11 @@ private fun SettingsSection(title: String) {
 }
 
 /**
- * One settings group: its rows sit together on a single 20dp-radius
- * surface card, split by hairlines, instead of floating loose on
- * the black background (v1.0.14).
+ * One settings group: its rows sit together on a single
+ * ForteGlass panel (RadiusPanel), split by hairlines, instead
+ * of floating loose on the black background (v1.0.14; glass
+ * v1.0.36-test). Groups ride unelevated — a scrolling column
+ * of groups reads cleaner without a shadow under each.
  */
 @Composable
 private fun SettingsGroup(rows: List<@Composable () -> Unit>) {
@@ -1125,8 +1128,10 @@ private fun SettingsGroup(rows: List<@Composable () -> Unit>) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(ForteColors.Surface)
+            .forteGlassPanel(
+                RoundedCornerShape(ForteGlass.RadiusPanel),
+                elevated = false,
+            )
             .padding(vertical = 4.dp),
     ) {
         rows.forEachIndexed { index, row ->
@@ -1214,8 +1219,8 @@ private fun SettingsSwitchRow(
             checked = checked,
             onCheckedChange = onChange,
             colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
-                checkedTrackColor = ForteColors.Red,
+                checkedThumbColor = Color.Black,
+                checkedTrackColor = Color.White,
                 uncheckedThumbColor = ForteColors.TextDim,
                 uncheckedTrackColor = ForteColors.SurfaceHi,
             ),

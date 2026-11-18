@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="assets/forte-wordmark.png" alt="Forte" width="440">
+  <img src="assets/soniko-wordmark.png" alt="Soniko" width="440">
 </p>
 
-# Forte
+# Soniko Music
 
-Forte is a music app for Android. It plays songs, albums and playlists from YouTube Music in a clean, dark player — no ads in the way, and your library stays on your phone.
+Soniko is a music app for Android. It plays songs, albums and playlists from YouTube Music in a clean, dark player — no ads in the way, and your library stays on your phone.
 
 **[Download the latest release](../../releases/latest)** — Android 8.0 or newer.
 
@@ -29,17 +29,17 @@ Forte is a music app for Android. It plays songs, albums and playlists from YouT
 - Background play that keeps going when you leave the app, with notification and lock-screen controls
 - A player with lyrics, song credits, radio, a queue, sleep timer, playback speed and an audio output picker
 - Region and language you pick yourself, used across Home, Explore and charts
-- In-app updates: Forte checks this repo for new versions and installs them in place
+- In-app updates: Soniko checks this repo for new versions and installs them in place
 
 ## Architecture
 
 One Android app module — Kotlin and Jetpack Compose, Media3/ExoPlayer for playback.
 
-- `data/ForteEngine.kt` and `data/YtAccount.kt` — all talking to YouTube Music happens on the device. There is no Forte server in the play path; streams are resolved on the phone at tap time.
+- `data/ForteEngine.kt` and `data/YtAccount.kt` — all talking to YouTube Music happens on the device. There is no Soniko server in the play path; streams are resolved on the phone at tap time.
 - `playback/` — a foreground service and the player controller own the queue, shuffle, repeat and re-resolving expired stream links.
 - `data/db/` — a Room database holds the on-phone library: favourites, playlists, history, follows and downloads.
 - `data/Downloads.kt` — downloads are plain audio files in app storage, playable offline.
-- `ui/` — one screen per file. The look is fixed: black surfaces, one red accent, a frosted-glass capsule dock floating over the content.
+- `ui/` — one screen per file. The look is fixed: pure black surfaces, one pink accent, frosted-glass capsules floating over the content.
 - `data/UpdateChecker.kt` — reads `stable.json` from this repo to offer updates.
 
 ## Build

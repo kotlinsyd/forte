@@ -72,8 +72,7 @@ fun DownloadsScreen(
             Column(
                 modifier = Modifier
                     .padding(horizontal = 20.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(ForteColors.Surface)
+                    .forteGlassPanel(RoundedCornerShape(ForteGlass.RadiusCard))
                     .padding(16.dp),
             ) {
                 Text(
@@ -92,7 +91,7 @@ fun DownloadsScreen(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Forte downloads on this device" +
+                    "Soniko downloads on this device" +
                         if (deviceTotal > 0) " · ${formatBytes(deviceTotal)} total storage" else "",
                     fontSize = 12.sp, color = ForteColors.TextDim,
                 )

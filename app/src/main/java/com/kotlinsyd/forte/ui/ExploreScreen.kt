@@ -175,8 +175,8 @@ fun ExploreScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 androidx.compose.foundation.Image(
-                    painter = painterResource(R.drawable.forte_wordmark),
-                    contentDescription = "FORTE.",
+                    painter = painterResource(R.drawable.soniko_wordmark),
+                    contentDescription = "SONIKO.",
                     modifier = Modifier.height(24.dp),
                 )
                 Spacer(Modifier.weight(1f))
@@ -303,7 +303,7 @@ fun ExploreScreen(
             item {
                 Spacer(Modifier.height(26.dp))
                 Text(
-                    "Explore couldn't load. Check your connection and reopen Forte.",
+                    "Explore couldn't load. Check your connection and reopen Soniko.",
                     color = ForteColors.TextDim, fontSize = 13.sp,
                     modifier = Modifier.padding(horizontal = 20.dp),
                 )
@@ -364,7 +364,7 @@ private fun ExploreShelfRow(
                     .width(156.dp)
                     .clickable { actions.play(track, shelf.tracks, shelf.title) },
             ) {
-                Artwork(track.thumbUrl, track.title, 156.dp, corner = 14.dp)
+                Artwork(track.thumbUrl, track.title, 156.dp, corner = ForteGlass.RadiusArtwork)
                 Spacer(Modifier.height(8.dp))
                 Text(
                     track.title, style = ForteType.cardTitle,
@@ -382,7 +382,7 @@ private fun ExploreShelfRow(
                     .width(156.dp)
                     .clickable { onOpenYtPlaylist(card.browseId) },
             ) {
-                Artwork(card.thumbUrl, card.title, 156.dp, corner = 14.dp)
+                Artwork(card.thumbUrl, card.title, 156.dp, corner = ForteGlass.RadiusArtwork)
                 Spacer(Modifier.height(8.dp))
                 Text(
                     card.title, style = ForteType.cardTitle,

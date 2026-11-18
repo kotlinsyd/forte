@@ -69,7 +69,7 @@ class ForteWidget : AppWidgetProvider() {
             val ids = manager.getAppWidgetIds(ComponentName(context, ForteWidget::class.java))
             if (ids.isEmpty()) return
             val views = RemoteViews(context.packageName, R.layout.widget_forte)
-            views.setTextViewText(R.id.widget_title, title ?: "Forte")
+            views.setTextViewText(R.id.widget_title, title ?: "Soniko")
             views.setTextViewText(R.id.widget_artist, artist ?: "Nothing playing")
             views.setImageViewResource(
                 R.id.widget_playpause,

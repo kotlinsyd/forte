@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cloud-backup exclusions (v1.0.37-test, the owed S3 fix): the
+  settings store carries the account identity the app shows for
+  the signed-in session; it stays on the device and is never
+  part of an Android cloud backup.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="forte_settings.xml" />
+</full-backup-content>

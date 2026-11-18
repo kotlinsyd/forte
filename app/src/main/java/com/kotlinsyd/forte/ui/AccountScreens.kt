@@ -254,8 +254,7 @@ fun LoginScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 12.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(ForteColors.Surface)
+                    .forteGlassPanel(RoundedCornerShape(ForteGlass.RadiusCard))
                     .padding(16.dp),
             ) {
                 if (checking && account == null) {
@@ -293,7 +292,7 @@ fun LoginScreen(
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(50))
-                                .background(ForteColors.Red)
+                                .background(Color.White)
                                 .clickable {
                                     app.settings.mergeAccount(
                                         account!!.name, account!!.handle, account!!.avatarUrl,
@@ -303,7 +302,7 @@ fun LoginScreen(
                                 }
                                 .padding(horizontal = 20.dp, vertical = 10.dp),
                         ) {
-                            Text("Use this account", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text("Use this account", color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                         }
                         Spacer(Modifier.weight(1f))
                         Box(
@@ -599,8 +598,7 @@ fun AccountScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(ForteColors.Surface)
+                        .forteGlassPanel(RoundedCornerShape(ForteGlass.RadiusCard))
                         .padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -643,8 +641,8 @@ fun AccountScreen(
                     }
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .border(1.dp, ForteColors.Border, RoundedCornerShape(50))
+                            .clip(RoundedCornerShape(ForteGlass.RadiusCapsule))
+                            .border(1.dp, ForteGlass.Hairline, RoundedCornerShape(ForteGlass.RadiusCapsule))
                             .clickable {
                                 YtAccount.signOut()
                                 app.settings.clearAccount()
@@ -682,7 +680,7 @@ fun AccountScreen(
                         }
                     },
                     {
-                        AccountLink(Icons.Filled.BarChart, "Your Forte stats", "Top artists, songs and time") {
+                        AccountLink(Icons.Filled.BarChart, "Your Soniko stats", "Top artists, songs and time") {
                             onOpenStats()
                         }
                     },
@@ -693,7 +691,7 @@ fun AccountScreen(
                     color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    "Forte works fully without an account. Sign in only if you want your YouTube likes, playlists, subscriptions and history here.",
+                    "Soniko works fully without an account. Sign in only if you want your YouTube likes, playlists, subscriptions and history here.",
                     color = ForteColors.TextDim, fontSize = 13.sp,
                     modifier = Modifier.padding(top = 6.dp),
                 )
@@ -701,16 +699,16 @@ fun AccountScreen(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .background(ForteColors.Red)
+                        .background(Color.White)
                         .clickable { onOpenLogin() }
                         .padding(horizontal = 24.dp, vertical = 12.dp),
                 ) {
-                    Text("Sign in with Google", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    Text("Sign in with Google", color = Color.Black, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.height(14.dp))
                 AccountGroup(
                     {
-                        AccountLink(Icons.Filled.BarChart, "Your Forte stats", "Top artists, songs and time") {
+                        AccountLink(Icons.Filled.BarChart, "Your Soniko stats", "Top artists, songs and time") {
                             onOpenStats()
                         }
                     },
@@ -727,8 +725,10 @@ private fun AccountGroup(vararg rows: @Composable () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(ForteColors.Surface)
+            .forteGlassPanel(
+                RoundedCornerShape(ForteGlass.RadiusCard),
+                elevated = false,
+            )
             .padding(vertical = 4.dp),
     ) {
         rows.forEachIndexed { index, row ->

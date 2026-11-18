@@ -14,8 +14,8 @@ android {
         applicationId = "com.kotlinsyd.forte"
         minSdk = 26
         targetSdk = 35
-        versionCode = 40
-        versionName = "1.0.22"
+        versionCode = 50
+        versionName = "1.0.23"
 
         // === SENTRY DSN (Forte's own project) ==========================
         // The DSN of Forte's own Sentry project is read from a private
@@ -73,6 +73,36 @@ android {
     lint {
         abortOnError = false
     }
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            all { t ->
+                // Robolectric fetches its android-all runtime through
+                // the same egress proxy Gradle uses. gradle.properties
+                // systemProps reach the daemon; forward them so the
+                // forked test JVM can resolve it too (the test class
+                // installs the matching Authenticator).
+                for (k in listOf(
+                    "http.proxyHost", "http.proxyPort", "http.proxyUser",
+                    "http.proxyPassword", "https.proxyHost",
+                    "https.proxyPort", "https.proxyUser",
+                    "https.proxyPassword",
+                )) {
+                    System.getProperty(k)?.let { v -> t.systemProperty(k, v) }
+                }
+                // Robolectric's android-all runtime is served from a
+                // local file repository (populated by curl): the
+                // egress proxy's per-session credential can die
+                // mid-run, and a local repo cannot.
+                t.systemProperty("robolectric.dependency.repo.id", "local")
+                t.systemProperty(
+                    "robolectric.dependency.repo.url",
+                    "file:///home/hatch/workspace/forte/robolectric-repo/",
+                )
+                t.maxHeapSize = "1536m"
+            }
+        }
+    }
 }
 
 dependencies {
@@ -104,4 +134,16 @@ dependencies {
     // shadows it.
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    // Pull-path UI tests (Robolectric + Compose): the Home pull
+    // gesture is exercised against the real refresh container and
+    // hero composable, not a re-implementation.
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.ext.junit)
+    testImplementation(libs.androidx.ui.test.junit4)
+    // ui-test-manifest declares ComponentActivity; it must merge
+    // into the DEBUG variant's manifest, which is the manifest
+    // the Robolectric compose tests launch against (the release
+    // packaged manifest declares only MainActivity).
+    debugImplementation(libs.androidx.ui.test.manifest)
 }

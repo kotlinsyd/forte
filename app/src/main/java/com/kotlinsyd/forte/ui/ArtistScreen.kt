@@ -1,6 +1,7 @@
 package com.kotlinsyd.forte.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,15 +13,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -36,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -87,9 +92,29 @@ fun ArtistScreen(
 
     val isFollowing = follows.any { it.channelUrl == channelUrl }
 
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp + LocalDockClearance.current)) {
+    // The artwork palette (v1.0.37-test): the whole page is
+    // derived from the artist's own photograph — an artist
+    // page is the wash (the photo's bottom-edge colour),
+    // flat, all the way down under the photo, with the
+    // glass chips and the play disc drawn from the same
+    // sleeve. Until the photo lands, the theme's own
+    // colours stand in and the page warms into its tint.
+    val palette = rememberArtworkPalette(channel?.bannerUrl ?: channel?.avatarUrl)
+
+    LazyColumn(
+        Modifier.fillMaxSize().background(palette.wash),
+        contentPadding = PaddingValues(bottom = 16.dp + LocalDockClearance.current),
+    ) {
         item {
-            Box(Modifier.fillMaxWidth().height(190.dp)) {
+            // The photograph, sharp and full-bleed — no blur
+            // (v1.0.36-test blurred it; the reference design
+            // runs the photo clean and lets its own bottom
+            // edge melt into the wash the page is painted
+            // in, so the picture reads as carrying on rather
+            // than as a second surface beginning). The name
+            // rides over the foot of the photo; Back rides in
+            // a glass circle drawn from the palette.
+            Box(Modifier.fillMaxWidth().height(320.dp)) {
                 val banner = channel?.bannerUrl ?: channel?.avatarUrl
                 if (banner != null) {
                     AsyncImage(
@@ -107,44 +132,93 @@ fun ArtistScreen(
                 Box(
                     Modifier.fillMaxSize().background(
                         Brush.verticalGradient(
-                            listOf(Color.Transparent, ForteColors.Bg.copy(alpha = 0.92f))
+                            0f to Color.Transparent,
+                            0.55f to Color.Transparent,
+                            1f to palette.wash,
                         )
                     )
                 )
-                androidx.compose.material3.IconButton(
-                    onClick = onBack,
-                    modifier = Modifier.padding(4.dp),
+                Box(
+                    modifier = Modifier
+                        .padding(12.dp)
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(palette.elevated)
+                        .border(1.dp, palette.divider, CircleShape)
+                        .clickable { onBack() },
+                    contentAlignment = Alignment.Center,
                 ) {
                     androidx.compose.material3.Icon(
                         Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back", tint = Color.White,
+                        contentDescription = "Back", tint = palette.onBackground,
+                        modifier = Modifier.size(20.dp),
                     )
                 }
                 Column(
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 12.dp),
+                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 16.dp, bottom = 12.dp),
                 ) {
                     Text(
                         channel?.name ?: "Artist",
-                        fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                        fontSize = 28.sp, fontWeight = FontWeight.SemiBold, color = palette.onBackground,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                     val subs = channel?.subscribers ?: -1
                     if (subs > 0) {
-                        Text("${formatViews(subs)} subscribers", fontSize = 13.sp, color = ForteColors.TextDim)
+                        Text("${formatViews(subs)} subscribers", fontSize = 13.sp, color = palette.onBackgroundVariant)
                     }
                 }
             }
         }
         item {
             Row(
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                if (topSongs.isNotEmpty()) {
+                    // The prominent play control: a solid disc
+                    // in the artwork's own accent (contrast-
+                    // corrected against the page tint), the
+                    // glyph black or white by the accent's own
+                    // luminance — the page's one loud element,
+                    // in the record's colour, not the app's red.
+                    val accentContent = if (palette.accent.luminance() > 0.5f) {
+                        Color.Black
+                    } else {
+                        Color.White
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(palette.accent)
+                            .clickable {
+                                actions.play(
+                                    topSongs.first(), topSongs,
+                                    channel?.name ?: "Top songs",
+                                )
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        androidx.compose.material3.Icon(
+                            Icons.Filled.PlayArrow,
+                            contentDescription = "Play top songs",
+                            tint = accentContent,
+                            modifier = Modifier.size(28.dp),
+                        )
+                    }
+                    Text(
+                        "Play top songs",
+                        fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        color = palette.onBackground,
+                    )
+                    Spacer(Modifier.weight(1f))
+                }
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(if (isFollowing) ForteColors.SurfaceHi else ForteColors.Red)
+                        .clip(RoundedCornerShape(ForteGlass.RadiusCapsule))
+                        .background(palette.elevated)
+                        .border(1.dp, palette.divider, RoundedCornerShape(ForteGlass.RadiusCapsule))
                         .clickable {
                             val ch = channel ?: return@clickable
                             scope.launch {
@@ -155,19 +229,9 @@ fun ArtistScreen(
                 ) {
                     Text(
                         if (isFollowing) "Following" else "Follow",
-                        fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                        fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                        color = if (isFollowing) palette.onBackgroundVariant else palette.accent,
                     )
-                }
-                if (topSongs.isNotEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .background(ForteColors.Surface)
-                            .clickable { actions.play(topSongs.first(), topSongs, channel?.name ?: "Top songs") }
-                            .padding(horizontal = 22.dp, vertical = 10.dp),
-                    ) {
-                        Text("Play top songs", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
-                    }
                 }
             }
         }
@@ -180,12 +244,12 @@ fun ArtistScreen(
             failed -> item {
                 Text(
                     "Couldn't load this artist.", color = ForteColors.TextDim,
-                    modifier = Modifier.padding(horizontal = 20.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp),
                 )
             }
             else -> {
                 item {
-                    SectionHeader("Top songs", modifier = Modifier.padding(horizontal = 20.dp))
+                    SectionHeader("Top songs", modifier = Modifier.padding(horizontal = 16.dp))
                     Spacer(Modifier.height(6.dp))
                 }
                 items(topSongs.take(10)) { track ->
@@ -203,24 +267,24 @@ fun ArtistScreen(
                 if (albums.isNotEmpty()) {
                     item {
                         Spacer(Modifier.height(20.dp))
-                        SectionHeader("Albums", modifier = Modifier.padding(horizontal = 20.dp))
+                        SectionHeader("Albums", modifier = Modifier.padding(horizontal = 16.dp))
                         Spacer(Modifier.height(10.dp))
                         // FORTE-9: plain scrollable Row, not a LazyRow
                         // (nested-lazy focus-search freeze — see Home).
                         Row(
                             modifier = Modifier
                                 .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 20.dp),
+                                .padding(horizontal = 16.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                         ) {
                             albums.forEach { album ->
                                 Column(
                                     modifier = Modifier
-                                        .width(156.dp)
+                                        .width(150.dp)
                                         .clickable { onOpenYtPlaylist(album.url) },
                                 ) {
-                                    Artwork(album.thumbUrl, album.title, 156.dp, corner = 14.dp)
-                                    Spacer(Modifier.height(7.dp))
+                                    Artwork(album.thumbUrl, album.title, 150.dp, corner = ForteGlass.RadiusArtwork)
+                                    Spacer(Modifier.height(10.dp))
                                     Text(
                                         album.title, style = ForteType.cardTitle,
                                         color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -233,12 +297,12 @@ fun ArtistScreen(
                 channel?.description?.takeIf { it.isNotBlank() }?.let { desc ->
                     item {
                         Spacer(Modifier.height(22.dp))
-                        SectionHeader("About", modifier = Modifier.padding(horizontal = 20.dp))
+                        SectionHeader("About", modifier = Modifier.padding(horizontal = 16.dp))
                         Spacer(Modifier.height(8.dp))
                         Text(
                             desc.take(600),
-                            fontSize = 13.sp, color = ForteColors.TextDim,
-                            modifier = Modifier.padding(horizontal = 20.dp),
+                            fontSize = 13.sp, color = palette.onBackgroundVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp),
                         )
                     }
                 }

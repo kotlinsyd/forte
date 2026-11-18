@@ -1,10 +1,12 @@
 package com.kotlinsyd.forte.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -64,11 +66,6 @@ import com.kotlinsyd.forte.data.ForteEngine
 import com.kotlinsyd.forte.data.formatViews
 import kotlinx.coroutines.launch
 
-
-/** Home's freshness window (v1.0.21): a saved catalogue younger
- * than this is trusted as-is when Home resumes — no refetch. A
- * pull-to-refresh always fetches, stamp or no stamp. */
-private const val STALE_MS = 3 * 3600 * 1000L
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -141,19 +138,25 @@ fun HomeScreen(
     }
     var homeFailed by remember { mutableStateOf(false) }
     var loadedKey by remember { mutableStateOf("") }
-    // Auto-refresh (v1.0.21): Home's effects used to re-run only
-    // when the region or account changed, so a process that stayed
-    // alive served the first catalogue it ever loaded — for days.
-    // A resume tick now re-runs both effects on every return; each
-    // run trusts a cache younger than STALE_MS and skips the
-    // network, and a pull (forceTick) always fetches. The handled
-    // markers remember which force each effect already served, so
-    // a plain resume never mistakes an old pull for a new one.
+    // Auto-refresh (v1.0.21, reworked v1.0.34-test): a resume
+    // tick re-runs both effects on every return, and EVERY run
+    // fetches — the cache still paints instantly and the fresh
+    // feed swaps in behind it (stale-while-revalidate), but no
+    // run trusts the cache and skips the network anymore. The
+    // v1.0.21–v1.0.33 freshness gate (trust anything younger
+    // than 3 h) meant a phone opened more often than every 3
+    // hours effectively never refetched: the feed read as
+    // never auto-refreshing, which is exactly what the owner
+    // reported. A pull is a run like any other, plus the
+    // spinner and the hero stride (see HomePullState).
     var resumeTick by remember { mutableStateOf(0) }
-    var forceTick by remember { mutableStateOf(0) }
-    var isRefreshing by remember { mutableStateOf(false) }
-    var handledHomeForce by remember { mutableStateOf(0) }
-    var handledChartsForce by remember { mutableStateOf(0) }
+    // The pull's whole state in one holder (v1.0.34-test): the
+    // gesture handler, the feed effects and the refresh box all
+    // read and write this ONE object, and the pull path is
+    // exercised through it by the UI tests — the real handler,
+    // not a copy.
+    val pull = remember { HomePullState() }
+    val resumeGate = remember { ResumeGate() }
     DisposableEffect(context) {
         val activity = generateSequence(context) {
             (it as? android.content.ContextWrapper)?.baseContext
@@ -161,20 +164,20 @@ fun HomeScreen(
         if (activity == null) {
             onDispose { }
         } else {
-            var replayed = false
             val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
                 if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                     // Registering replays the current state once:
                     // that first ON_RESUME is composition itself,
-                    // not a return — only later resumes count.
-                    if (replayed) resumeTick++ else replayed = true
+                    // not a return — ResumeGate swallows it; only
+                    // later resumes count as returns.
+                    if (resumeGate.onResume()) resumeTick++
                 }
             }
             activity.lifecycle.addObserver(observer)
             onDispose { activity.lifecycle.removeObserver(observer) }
         }
     }
-    LaunchedEffect(settings.regionGl, settings.regionChosen, accountTick, resumeTick, forceTick) {
+    LaunchedEffect(settings.regionGl, settings.regionChosen, accountTick, resumeTick, pull.forceTick) {
         val region = app.settings.region()
         val key = com.kotlinsyd.forte.data.HomeCache.key(region.gl, signedIn)
         if (key != loadedKey) {
@@ -194,19 +197,9 @@ fun HomeScreen(
             }
         }
         homeFailed = false
-        // Freshness gate (v1.0.21): a run that finds this key's
-        // cache younger than STALE_MS trusts what it just painted
-        // and skips the network entirely. A forced run (a pull)
-        // always fetches; its marker is recorded as the fetch
-        // starts, so the run itself is the one that serves it.
-        val forcedHome = forceTick != handledHomeForce
-        if (!forcedHome && cached != null && cached.savedAt > 0 &&
-            System.currentTimeMillis() - cached.savedAt < STALE_MS
-        ) {
-            isRefreshing = false
-            return@LaunchedEffect
-        }
-        if (forcedHome) handledHomeForce = forceTick
+        // No freshness gate (v1.0.34-test): every run fetches.
+        // What was painted from the cache above stays on screen
+        // until the fresh feed lands and swaps in behind it.
         val watchdog = launch {
             kotlinx.coroutines.delay(6_000)
             if (homeShelves.isNullOrEmpty()) {
@@ -238,7 +231,7 @@ fun HomeScreen(
         // when the fetch settles, success or failure (a background
         // run landing here with the spinner somehow up clears it
         // too — it is only ever up during a pull).
-        isRefreshing = false
+        pull.settle()
         watchdog.cancel()
         // Home supplements — the same extra wells the Home feed
         // merges in (new releases, explore, mixed for
@@ -264,23 +257,11 @@ fun HomeScreen(
     // once with a US-default search and never again). Region-true
     // charts come from FEmusic_charts with the picked country; the
     // extractor search is only the fallback lane.
-    LaunchedEffect(settings.regionGl, accountTick, resumeTick, forceTick) {
+    LaunchedEffect(settings.regionGl, accountTick, resumeTick, pull.forceTick) {
         chartsFailed = false
-        // The same freshness gate as the feed effect (v1.0.21):
-        // charts ride the same HomeCache payload, so the same
-        // stamp decides. A forced run always fetches.
-        val forcedCharts = forceTick != handledChartsForce
-        if (!forcedCharts) {
-            val gateCached = com.kotlinsyd.forte.data.HomeCache.load(
-                context, app.settings.region().gl, signedIn,
-            )
-            if (gateCached != null && gateCached.savedAt > 0 &&
-                System.currentTimeMillis() - gateCached.savedAt < STALE_MS
-            ) {
-                return@LaunchedEffect
-            }
-        }
-        if (forcedCharts) handledChartsForce = forceTick
+        // No freshness gate here either (v1.0.34-test): charts
+        // ride the same triggers as the feed and refetch on
+        // every run, for the selected region.
         runCatching { com.kotlinsyd.forte.data.YtAccount.charts() }
             .onSuccess { res ->
                 if (res.tracks.isNotEmpty()) {
@@ -306,19 +287,13 @@ fun HomeScreen(
             }
     }
 
-    // Home header (owner's pick, Sample C): no greeting — the
-    // wordmark carries a small dim line naming the picked region
-    // and its language ("Pakistan · English"), always read from
-    // the live settings pick, never hardcoded.
+    // The picked region, read live from settings (the country
+    // label under the wordmark displays it; never hardcoded).
     val pickedRegion = if (settings.regionGl.isBlank()) {
         com.kotlinsyd.forte.data.Regions.deviceDefault()
     } else {
         com.kotlinsyd.forte.data.Regions.byGl(settings.regionGl)
     }
-    val regionLine = pickedRegion.name + " · " +
-        java.util.Locale(pickedRegion.hl)
-            .getDisplayLanguage(java.util.Locale.ENGLISH)
-            .replaceFirstChar { it.uppercase() }
 
     val scope = rememberCoroutineScope()
     // HERO content rule (v1.0.24-test, owner's order): the hero
@@ -333,46 +308,43 @@ fun HomeScreen(
     // history. While charts are still loading there is no hero
     // — it joins when they land and never holds the page up.
     // No source, no hero (never a broken hero).
-    // Hero window rotation (v1.0.22): the hero still carries
-    // ONLY chart hits (owner's rule), but a chart's top 8 barely
-    // moves day to day, so the hero looked frozen even when Home
-    // truly refreshed. The window now walks the chart's top 20
-    // by day — every hero track is still a top-20 chart hit in
-    // chart order, and the featured set turns over daily and
-    // whenever the chart itself moves.
+    // Hero window rotation (v1.0.22, stride fixed v1.0.33-test):
+    // the hero still carries ONLY chart hits (owner's rule), but
+    // the v1.0.22 window advanced ONE chart position per day —
+    // seven of eight posters identical day after day over a
+    // near-static chart, and a pull never moved it at all, so
+    // the hero read as frozen since the update. The window now
+    // strides a full hero page per day over the chart's top 20,
+    // and a pull strides it again (see heroWindow): every hero
+    // track is still a top-20 chart hit in chart order, and the
+    // featured set turns over completely each day and on a pull.
     val heroDay = (System.currentTimeMillis() / 86_400_000L).toInt()
-    val heroTracks: List<Track> = remember(charts, homeShelves, history, chartsFailed, heroDay) {
-        when {
-            !charts.isNullOrEmpty() -> {
-                val pool = charts.orEmpty().take(20)
-                if (pool.size > 8) {
-                    val start = heroDay % (pool.size - 7)
-                    pool.drop(start).take(8)
-                } else {
-                    pool
-                }
-            }
-            chartsFailed || charts != null -> {
-                val mixed = homeShelves
-                    ?.firstOrNull { it.title.contains("Mixed", ignoreCase = true) }
-                    ?.tracks.orEmpty()
-                when {
-                    mixed.isNotEmpty() -> mixed.take(8)
-                    history.size >= 3 -> history.take(8)
-                    else -> emptyList()
-                }
-            }
-            else -> emptyList()
-        }
+    val heroTracks: List<Track> = remember(charts, homeShelves, history, chartsFailed, heroDay, pull.heroShift) {
+        heroTracksFor(charts, homeShelves, history, chartsFailed, heroDay, pull.heroShift)
     }
     val heroFromCharts = !charts.isNullOrEmpty() && heroTracks.isNotEmpty()
-    val heroEyebrow = when {
-        heroFromCharts ->
-            "TOP CHARTS" + (chartsLabel?.let { " · ${it.uppercase()}" } ?: "")
-        heroTracks.isNotEmpty() -> "MADE FOR YOU"
-        else -> ""
-    }
     val heroOrigin = if (heroFromCharts) "Top charts" else "Made for you"
+    // THE LEAD SHELF (v1.0.37-test): Home's layout is BitChord's
+    // now (see the list below), so the hero rule wears that
+    // design's lead-shelf form — a pager of compact track rows
+    // (columns of four), not the v1.0.35 featured card the
+    // owner rejected with the rest of that layout. The pager's
+    // first columns are the hero window itself (the region's
+    // top chart hits, striding by day and by pull — the
+    // stride is the pull's visible effect, exactly as it was
+    // on the card), and the rest of the chart follows in
+    // chart order behind it, so the whole top 20 is on the
+    // page. From a fallback well the pager is that well's
+    // window, as the hero was. A tap on a row plays it with
+    // the FULL chart as the queue — the chart entry's own
+    // behaviour, unchanged.
+    val chartPagerTracks: List<Track> = if (heroFromCharts) {
+        val pool = charts.orEmpty().take(20)
+        heroTracks + pool.filter { t -> heroTracks.none { it.id == t.id } }
+    } else {
+        heroTracks
+    }
+    val chartPagerQueue = if (heroFromCharts) charts.orEmpty() else chartPagerTracks
 
     // CARD TAP = PLAY (v1.0.24-test, owner's rule): a card tap
     // never lands on a playlist page — those pages usually hold
@@ -422,105 +394,204 @@ fun HomeScreen(
         }
     }
 
+    // The feed sections (v1.0.37-test): the feed's shelves in
+    // feed order, whole — the v1.0.35 arrangement (a pulled-
+    // out new-releases shelf, two spotlight doorways) is gone
+    // with that layout. Shelves flow the way the reference
+    // design's feed flows: one card shelf after another, in
+    // the order the feed served them.
+    val feedShelves = homeShelves.orEmpty()
+        .filter { it.tracks.isNotEmpty() || it.cards.isNotEmpty() }
+
     // (The now-playing colour wash that used to sit behind
-    // the top of Home is gone in v1.0.28-test: the owner's
-    // approved hero design puts the header zone on PURE
-    // black, and a tinted wash behind it would colour that
-    // black.)
+    // the top of Home stays gone: the Listen Now page opens
+    // on the plain page background, title first.)
     Box(Modifier.fillMaxSize()) {
-    // Pull-to-refresh (v1.0.21): wraps ONLY the scrolling list —
-    // the fixed header below stays outside, floating as it always
-    // has. A pull bumps forceTick; the feed effect's forced run
-    // is what actually fetches, and its settle clears the spinner.
-    PullToRefreshBox(
-        isRefreshing = isRefreshing,
+    // Pull-to-refresh (v1.0.21, reworked v1.0.34-test): wraps
+    // ONLY the scrolling list. A pull runs HomePullState.onPull;
+    // the feed effects' re-run is what actually fetches, and
+    // its settle clears the spinner. The v1.0.34-test fix put
+    // the indicator below the old floating header; the Listen
+    // Now page has no floating header, so the indicator rides
+    // at the very top of the list, in the open.
+    HomeRefreshBox(
+        isRefreshing = pull.isRefreshing,
         onRefresh = {
-            isRefreshing = true
+            // The whole pull in one holder call (v1.0.34-test):
+            // spinner up, hero window strides a full page, and
+            // the feed effects re-run and fetch. The stride is
+            // the pull's guaranteed visible effect: a signed-in
+            // session's feed and the chart are composed per
+            // account and barely move between asks, so the fetch
+            // alone can repaint an identical screen — the new
+            // featured card cannot. It applies to whichever well
+            // feeds the card (charts, the taste shelf, history —
+            // see heroTracksFor).
+            pull.onPull()
             // A pull must be able to bring a NEW home, not the
             // same feed re-served to the same visitor: rotate
             // the guest visitor BEFORE the forced run starts,
             // so its fetches compose a fresh feed (v1.0.22).
             com.kotlinsyd.forte.data.YtAccount.rotateGuestVisitor()
-            forceTick++
         },
+        indicatorTop = 12.dp,
         modifier = Modifier.fillMaxSize(),
     ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         // Invisible end clearance — the list itself scrolls
         // behind the floating dock to the physical screen edge.
-        // Top: the header zone (v1.0.28-test) — the black bar
-        // (66dp) plus its fade strip (14dp) — is exactly 80dp,
-        // hero or no hero, so the hero poster's top edge lands
-        // precisely where the black has finished fading and
-        // the poster itself starts clean.
         contentPadding = PaddingValues(
-            top = 80.dp,
             bottom = 16.dp + LocalDockClearance.current,
         ),
     ) {
-        if (heroTracks.isNotEmpty()) {
-            item {
-                HomeHero(
-                    tracks = heroTracks,
-                    eyebrow = heroEyebrow,
-                    isFavorite = { track -> track.id in favoriteIds },
-                    onPlay = { track ->
-                        actions.play(track, heroTracks, heroOrigin)
-                    },
-                    onToggleFavorite = { track -> actions.toggleFavorite(track) },
-                )
-            }
-        }
-        if (history.isNotEmpty()) {
-            item {
-                Spacer(Modifier.height(26.dp))
-                SectionHeader(
-                    "Listen again",
-                    actionText = "See all",
-                    onAction = onOpenHistory,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                )
-                Spacer(Modifier.height(12.dp))
-                // SAMPLE A (v1.0.23-test, owner's pick): Listen
-                // again is a card row now — big square artwork
-                // cards, title under each, artist under that. A
-                // tap plays the song in its history queue, as the
-                // rows did; the rows' three-dot menu rides a long
-                // press on the card. A plain scrollable Row, not
-                // a LazyRow (FORTE-9's nested-lazy lesson — the
-                // shelves below follow the same rule).
-                Row(
-                    modifier = Modifier
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    history.forEach { track ->
-                        ListenAgainCard(
-                            track = track,
-                            actions = actions,
-                            isFavorite = track.id in favoriteIds,
-                            isCurrent = track.id == currentTrackId,
-                            onClick = { actions.play(track, history, "Listen again") },
+        // 1 — The header (v1.0.37-test, the reference design's
+        // header treatment): the FORTE wordmark stands at the
+        // top of the page — that is where the app's mark lives
+        // — with the account door at its right (the same door
+        // as always: his Google photo when signed in, the plain
+        // profile icon when not; a tap opens the account sheet
+        // / Settings). No giant page title under it: the page
+        // opens on the mark and goes straight to the shelves,
+        // the way the reference Home opens. The picked region
+        // only DISPLAYS here (v1.0.38-test, owner's order: the
+        // selector on Home "looks bad" — changing the region
+        // lives ONLY in Settings now), and since v1.0.39-test
+        // it displays as small plain text tucked under the
+        // wordmark's E end — no capsule, no chip (the .38
+        // glass chip is gone on the owner's word: "not country
+        // name in capsule, just put under Forte a country
+        // small"). The feed effects still key on
+        // settings.regionGl exactly as before.
+        item {
+            Column(
+                Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Wordmark + country, one left block: the
+                    // name is right-aligned inside the block,
+                    // so its right edge sits exactly under the
+                    // wordmark's final E.
+                    Column(horizontalAlignment = Alignment.End) {
+                        androidx.compose.foundation.Image(
+                            painter = painterResource(R.drawable.soniko_wordmark),
+                            contentDescription = "SONIKO.",
+                            modifier = Modifier.height(26.dp),
                         )
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            pickedRegion.name,
+                            style = ForteType.groupLabel,
+                            color = ForteColors.TextDim,
+                            maxLines = 1,
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    val avatar = headerAvatar ?: app.settings.accountAvatar()
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(ForteColors.SurfaceHi)
+                            .clickable { onOpenAccount() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (signedIn && !avatar.isNullOrBlank()) {
+                            coil.compose.AsyncImage(
+                                model = avatar,
+                                contentDescription = "Your account",
+                                modifier = Modifier.fillMaxSize().clip(CircleShape),
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.Person, contentDescription = "Account",
+                                tint = Color.White, modifier = Modifier.size(20.dp),
+                            )
+                        }
                     }
                 }
             }
         }
-
-        // The real region home feed: shelves straight from YouTube
-        // Music (song shelves play in place; card shelves open the
-        // playlist/album page they point at). The full set the feed
-        // returns — no cap.
+        // 2 — The lead shelf: the region's top chart as a
+        // pager of compact rows (the hero rule in the new
+        // layout's form — see chartPagerTracks above). Rows
+        // carry their true chart rank; a tap plays the song
+        // with the full chart as its queue.
+        if (chartPagerTracks.isNotEmpty()) {
+            item {
+                Spacer(Modifier.height(16.dp))
+                HomeSectionHeader(
+                    title = if (heroFromCharts) {
+                        "Top Songs — ${chartsLabel ?: pickedRegion.name}"
+                    } else {
+                        heroOrigin
+                    },
+                )
+                HomeTrackPager(
+                    tracks = chartPagerTracks,
+                    queue = chartPagerQueue,
+                    queueLabel = if (heroFromCharts) "Top charts" else heroOrigin,
+                    actions = actions,
+                    favoriteIds = favoriteIds,
+                    currentTrackId = currentTrackId,
+                    isPlaying = isPlaying,
+                    rankOf = if (heroFromCharts) {
+                        { track -> charts.orEmpty().indexOfFirst { it.id == track.id } + 1 }
+                    } else {
+                        null
+                    },
+                )
+                Spacer(Modifier.height(10.dp))
+            }
+        } else if (charts == null && !chartsFailed) {
+            item {
+                Spacer(Modifier.height(26.dp))
+                Box(Modifier.padding(horizontal = 16.dp)) { SkeletonShelf() }
+            }
+        } else if (chartsFailed) {
+            item {
+                Spacer(Modifier.height(26.dp))
+                Text(
+                    "Charts couldn't load. Check your connection and reopen Soniko.",
+                    color = ForteColors.TextDim, fontSize = 13.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+        }
+        // 3 — Recently played: his real listening history
+        // (Library.history) as the same pager — the reference
+        // design's Recents form. No history yet → the section
+        // is absent and the feed shelves below flow up into
+        // its place; nothing is faked to fill it.
+        if (history.isNotEmpty()) {
+            item {
+                HomeSectionHeader(
+                    title = "Recently played",
+                    actionText = "See all",
+                    onAction = onOpenHistory,
+                )
+                HomeTrackPager(
+                    tracks = history.take(20),
+                    queue = history,
+                    queueLabel = "Listen again",
+                    actions = actions,
+                    favoriteIds = favoriteIds,
+                    currentTrackId = currentTrackId,
+                    isPlaying = isPlaying,
+                    rankOf = null,
+                )
+                Spacer(Modifier.height(10.dp))
+            }
+        }
+        // The feed's loading / failure states: shelf-shaped
+        // skeletons while there is no last-good to paint,
+        // bounded by the loader's watchdog; a plain line when
+        // the load failed outright.
         val shelves = homeShelves
         if (shelves == null && !homeFailed) {
-            // Fast first load with no last-good to show: shelf-shaped
-            // skeletons, bounded by the loader's watchdog — the feed
-            // or the fallback replaces them within seconds.
             items(2) {
                 Spacer(Modifier.height(26.dp))
-                Box(Modifier.padding(horizontal = 20.dp)) { SkeletonShelf() }
+                Box(Modifier.padding(horizontal = 16.dp)) { SkeletonShelf() }
             }
         }
         if (shelves == null && homeFailed) {
@@ -529,155 +600,39 @@ fun HomeScreen(
                 Text(
                     "Home couldn't load. Charts and your library still work below.",
                     color = ForteColors.TextDim, fontSize = 13.sp,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                )
-            }
-        }
-        if (shelves != null) {
-            items(shelves) { shelf ->
-                Spacer(Modifier.height(26.dp))
-                SectionHeader(shelf.title, modifier = Modifier.padding(horizontal = 20.dp))
-                Spacer(Modifier.height(12.dp))
-                // FORTE-9: a plain scrollable Row, not a LazyRow — a
-                // lazy list nested inside the Home lazy column makes a
-                // TV remote's focus search re-measure both lists and
-                // every card between on the main thread for one key
-                // press, which froze a low-end TV box into an ANR.
-                // Shelves are short, so an eager Row measures once,
-                // cheaply, and looks and scrolls the same.
-                Row(
-                    modifier = Modifier
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    shelf.tracks.forEach { track ->
-                        Column(
-                            modifier = Modifier
-                                .width(156.dp)
-                                .clickable { actions.play(track, shelf.tracks, shelf.title) },
-                        ) {
-                            Artwork(track.thumbUrl, track.title, 156.dp, corner = 14.dp)
-                            Spacer(Modifier.height(8.dp))
-                            // Fitted titles (v1.0.24-test, the
-                            // YouTube Music rule the owner
-                            // ordered): the title may take TWO
-                            // lines and its block is RESERVED at
-                            // two lines (38dp at cardTitle's 19sp
-                            // line height) whether the title
-                            // needs them or not, and the subtitle
-                            // line is always reserved too — so
-                            // every card in the row stands the
-                            // same height and nothing runs long
-                            // or jumps.
-                            Text(
-                                track.title, style = ForteType.cardTitle,
-                                color = Color.White, maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.height(38.dp),
-                            )
-                            Text(
-                                track.artist, style = ForteType.cardSub,
-                                color = ForteColors.TextDim,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.height(17.dp),
-                            )
-                        }
-                    }
-                    shelf.cards.forEach { card ->
-                        Column(
-                            modifier = Modifier
-                                .width(156.dp)
-                                // Card tap = play (v1.0.24-test):
-                                // never the playlist page.
-                                .clickable { playCard(card) },
-                        ) {
-                            Artwork(card.thumbUrl, card.title, 156.dp, corner = 14.dp)
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                card.title, style = ForteType.cardTitle,
-                                color = Color.White, maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.height(38.dp),
-                            )
-                            Text(
-                                card.subtitle ?: "", style = ForteType.cardSub,
-                                color = ForteColors.TextDim,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.height(17.dp),
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        item {
-            Spacer(Modifier.height(26.dp))
-            SectionHeader(
-                // The label is the country the charts server really
-                // selected for the picked region (some regions have
-                // no chart of their own and get Global — said so).
-                "Top charts" + (chartsLabel?.let { " · $it" } ?: ""),
-                modifier = Modifier.padding(horizontal = 20.dp),
-            )
-            Spacer(Modifier.height(8.dp))
-        }
-        when {
-            charts == null && !chartsFailed -> item {
-                Box(Modifier.padding(horizontal = 16.dp)) { SkeletonRows(5) }
-            }
-            chartsFailed -> item {
-                Text(
-                    "Charts couldn't load. Check your connection and reopen Forte.",
-                    color = ForteColors.TextDim, fontSize = 13.sp,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-                )
-            }
-            else -> itemsIndexed(charts.orEmpty().take(15)) { i, track ->
-                Row(
                     modifier = Modifier.padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "${i + 1}",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = ForteColors.TextDim,
-                        modifier = Modifier.width(22.dp),
-                    )
-                    TrackRow(
-                        track = track,
-                        actions = actions,
-                        isFavorite = track.id in favoriteIds,
-                        isCurrent = track.id == currentTrackId,
-                        isPlaying = isPlaying,
-                        onClick = { actions.play(track, charts.orEmpty(), "Top charts") },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-                if (track.viewCount > 0) {
-                    Text(
-                        "${formatViews(track.viewCount)} plays",
-                        fontSize = 11.sp, color = ForteColors.TextDim,
-                        modifier = Modifier.padding(start = 96.dp, bottom = 2.dp),
-                    )
-                }
+                )
+            }
+        }
+        // 4 — The real region home feed, in feed order:
+        // shelves straight from YouTube Music as card shelves
+        // (song shelves play in place; card shelves play the
+        // page behind the scenes — see playCard).
+        if (shelves != null) {
+            items(feedShelves) { shelf ->
+                HomeSectionHeader(shelf.title)
+                ShelfCardRow(
+                    shelf = shelf,
+                    actions = actions,
+                    onPlayCard = playCard,
+                )
+                Spacer(Modifier.height(16.dp))
             }
         }
 
+        // 5 — His own playlists as a card shelf (the same
+        // card language as the feed shelves: 150dp covers at
+        // the 12dp corner, title under, count under that).
         if (playlists.isNotEmpty()) {
             item {
-                Spacer(Modifier.height(26.dp))
-                SectionHeader("Made for you", modifier = Modifier.padding(horizontal = 20.dp))
-                Spacer(Modifier.height(12.dp))
+                HomeSectionHeader("Playlists")
                 // FORTE-9: plain scrollable Row, not a LazyRow
-                // (nested-lazy focus-search freeze — see the shelf
-                // row above).
+                // (nested-lazy focus-search freeze — see the
+                // shelf row above).
                 Row(
                     modifier = Modifier
                         .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 20.dp),
+                        .padding(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     playlists.forEach { playlist ->
@@ -694,13 +649,13 @@ fun HomeScreen(
                         }.distinct().take(4)
                         Column(
                             modifier = Modifier
-                                .width(156.dp)
+                                .width(150.dp)
                                 .clickable { onOpenPlaylist(playlist.id) },
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(156.dp)
-                                    .clip(RoundedCornerShape(14.dp))
+                                    .size(150.dp)
+                                    .clip(RoundedCornerShape(ForteGlass.RadiusArtwork))
                                     .background(
                                         Brush.linearGradient(artworkGradient(playlist.name)),
                                     ),
@@ -719,7 +674,7 @@ fun HomeScreen(
                                                     error = rememberArtworkPainter(playlist.name),
                                                     contentDescription = null,
                                                     contentScale = ContentScale.Crop,
-                                                    modifier = Modifier.size(78.dp),
+                                                    modifier = Modifier.size(75.dp),
                                                 )
                                             }
                                         }
@@ -734,7 +689,7 @@ fun HomeScreen(
                                                     error = rememberArtworkPainter(playlist.name),
                                                     contentDescription = null,
                                                     contentScale = ContentScale.Crop,
-                                                    modifier = Modifier.size(78.dp),
+                                                    modifier = Modifier.size(75.dp),
                                                 )
                                             }
                                         }
@@ -753,113 +708,26 @@ fun HomeScreen(
                                     else -> Text("♪", fontSize = 44.sp, color = ForteColors.Red)
                                 }
                             }
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(10.dp))
                             Text(
                                 playlist.name, style = ForteType.cardTitle,
-                                color = Color.White, maxLines = 2,
+                                color = Color.White, maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.height(38.dp),
                             )
                             Text(
                                 "$count songs", style = ForteType.cardSub,
                                 color = ForteColors.TextDim,
-                                modifier = Modifier.height(17.dp),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
                 }
+                Spacer(Modifier.height(16.dp))
             }
         }
 
     }
     }
-        // The header zone (owner-approved hero design,
-        // v1.0.28-test): the wordmark + region line + account
-        // avatar sit on PURE BLACK — a solid black bar with a
-        // short black fade under it. The bar floats over the
-        // page top as the header always has; what changed is
-        // that it no longer floats over the hero's artwork —
-        // the list's top clearance (80dp) is exactly this bar
-        // plus this fade, so the hero poster begins below the
-        // black, fully clean (see HomeHero).
-        Column(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color.Black)
-                .padding(start = 20.dp, end = 16.dp, top = 14.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column {
-                androidx.compose.foundation.Image(
-                    painter = painterResource(R.drawable.forte_wordmark),
-                    contentDescription = "FORTE.",
-                    modifier = Modifier.height(24.dp),
-                )
-                Spacer(Modifier.height(5.dp))
-                // The line still goes full white when a hero
-                // is up (owner's rule, v1.0.24-test: over the
-                // hero it must READ at full strength, never
-                // dim). It needs no shadow trick anymore:
-                // since v1.0.28-test the header sits on its
-                // own pure-black bar, never over the artwork.
-                // On plain-background pages it stays the dim
-                // line it has always been.
-                Text(
-                    regionLine,
-                    fontSize = 13.sp,
-                    color = if (heroTracks.isNotEmpty()) {
-                        Color.White
-                    } else {
-                        ForteColors.TextDim
-                    },
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.weight(1f))
-            // Profile (owner's order): his account photo when
-            // signed in, a plain profile icon when not. This
-            // avatar is the ONE settings door (v1.0.7): signed
-            // out it opens Settings, signed in the account sheet.
-            val avatar = headerAvatar ?: app.settings.accountAvatar()
-            Box(
-                modifier = Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(ForteColors.SurfaceHi)
-                    .clickable { onOpenAccount() },
-                contentAlignment = Alignment.Center,
-            ) {
-                if (signedIn && !avatar.isNullOrBlank()) {
-                    coil.compose.AsyncImage(
-                        model = avatar,
-                        contentDescription = "Your account",
-                        modifier = Modifier.fillMaxSize().clip(CircleShape),
-                    )
-                } else {
-                    Icon(
-                        Icons.Filled.Person, contentDescription = "Account",
-                        tint = Color.White, modifier = Modifier.size(20.dp),
-                    )
-                }
-            }
-        }
-        // The fade out of the black: a short melt from the
-        // bar's black to transparent. It completes exactly
-        // where the hero poster's top edge sits — the list's
-        // 80dp top clearance is this bar plus this strip — so
-        // the poster itself carries no dark at all.
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(14.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Black, Color.Transparent),
-                    ),
-                ),
-        )
-        }
     }
 }
 
@@ -969,16 +837,19 @@ fun PlayShuffleRow(onPlay: () -> Unit, onShuffle: () -> Unit) {
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(50))
-                .background(ForteColors.Red)
+                // The primary button (v1.0.37-test): white with
+                // black content — the design's primary/onPrimary
+                // pair. The red pill was the old theme's accent
+                // wash; red now lives on small marks only.
+                .background(Color.White)
                 .clickable { onPlay() }
                 .padding(horizontal = 26.dp, vertical = 11.dp),
         ) {
-            Text("Play", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Text("Play", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.Black)
         }
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(ForteColors.SurfaceHi)
+                .forteGlassChip(RoundedCornerShape(ForteGlass.RadiusCapsule))
                 .clickable { onShuffle() }
                 .padding(horizontal = 22.dp, vertical = 11.dp),
         ) {
@@ -1006,7 +877,7 @@ fun MoodCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
-    val shape = RoundedCornerShape(16.dp)
+    val shape = RoundedCornerShape(ForteGlass.RadiusArtwork)
     val ground = if (colorArgb != null) {
         val c = Color(colorArgb.toInt())
         androidx.compose.ui.graphics.lerp(c, ForteColors.Bg, 0.25f)
@@ -1023,6 +894,7 @@ fun MoodCard(
                     Brush.linearGradient(artworkGradient(title)),
                 ),
             )
+            .border(1.dp, ForteGlass.Hairline, shape)
             .clickable { onClick() },
     ) {
         Text(
@@ -1105,7 +977,7 @@ fun MoodScreen(
                     .fillMaxWidth()
                     .height(132.dp)
                     .padding(horizontal = 20.dp)
-                    .clip(RoundedCornerShape(16.dp)),
+                    .clip(RoundedCornerShape(ForteGlass.RadiusArtwork)),
             ) {
                 coil.compose.AsyncImage(
                     model = com.kotlinsyd.forte.data.artworkAt(
@@ -1184,7 +1056,7 @@ fun MoodScreen(
                                             .width(156.dp)
                                             .clickable { onOpenYtPlaylist(card.browseId) },
                                     ) {
-                                        Artwork(card.thumbUrl, card.title, 156.dp, corner = 14.dp)
+                                        Artwork(card.thumbUrl, card.title, 156.dp, corner = ForteGlass.RadiusArtwork)
                                         Spacer(Modifier.height(8.dp))
                                         Text(
                                             card.title, style = ForteType.cardTitle,
@@ -1209,8 +1081,9 @@ fun MoodScreen(
 }
 
 // ----------------------------------------------------------------------
-// Sample A + Sample 1 pieces (v1.0.23-test): the Listen again
-// card and the Home hero.
+// Home's pieces (v1.0.37-test): the shelf header, the compact-
+// row pager and its rows, the hero window maths, the pull
+// state, and the retired featured card the pull tests compose.
 // ----------------------------------------------------------------------
 
 /** The hero page's meta line: the artist, plus the play count
@@ -1222,46 +1095,149 @@ private fun heroMetaLine(track: Track): String =
     ).filter { it.isNotBlank() }.joinToString(" · ")
 
 /**
- * One Listen again card (Sample A): 148dp square artwork, the
- * title under it (one line, trimmed), the artist under that in
- * grey. An item without artwork stands on a rich per-title
- * gradient with a music-note glyph — never the bare-letter tile
- * (that cheap look is what this replaces). Tap plays; a long
- * press opens the track's menu (the row menu's sheet, hoisted).
+ * A Home shelf header (v1.0.37-test, the reference design's
+ * SectionHeader): the shelf's title at the row-title step,
+ * an optional subtitle under it in the dim colour, and an
+ * optional action at the right in the primary white. The
+ * header carries its own vertical padding (10dp), so
+ * sections stack header-to-content with no extra spacers —
+ * the feed's rhythm comes from these paddings plus the
+ * 26dp the section leaves under its content.
  */
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun ListenAgainCard(
+private fun HomeSectionHeader(
+    title: String,
+    actionText: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = title,
+            style = ForteType.rowTitle,
+            color = ForteColors.Text,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (actionText != null && onAction != null) {
+            Text(
+                text = actionText,
+                style = ForteType.cardTitle,
+                color = ForteColors.Text,
+                maxLines = 1,
+                modifier = Modifier
+                    .clickable { onAction() }
+                    .padding(start = 12.dp, top = 4.dp, bottom = 4.dp),
+            )
+        }
+    }
+}
+
+/**
+ * A pager of compact track rows (v1.0.37-test): the
+ * reference design's Recents form — the tracks chunked
+ * into columns of four compact rows, the columns laid in
+ * a horizontally scrolling row. A column is 88% of the
+ * available width, capped at 400dp, so a phone shows one
+ * column and the edge of the next. FORTE-9: a plain
+ * scrollable Row, not a LazyRow (nested-lazy freeze).
+ */
+@Composable
+private fun HomeTrackPager(
+    tracks: List<Track>,
+    queue: List<Track>,
+    queueLabel: String,
+    actions: TrackActions,
+    favoriteIds: Set<String>,
+    currentTrackId: String?,
+    isPlaying: Boolean,
+    rankOf: ((Track) -> Int)?,
+) {
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val columnWidth = minOf((maxWidth - 32.dp) * 0.88f, 400.dp)
+        Row(
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            tracks.chunked(4).forEach { column ->
+                Column(Modifier.width(columnWidth)) {
+                    column.forEach { track ->
+                        HomeCompactRow(
+                            track = track,
+                            rank = rankOf?.invoke(track),
+                            actions = actions,
+                            isFavorite = track.id in favoriteIds,
+                            isCurrent = track.id == currentTrackId,
+                            isPlaying = isPlaying,
+                            onClick = { actions.play(track, queue, queueLabel) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One compact track row (v1.0.37-test, the reference
+ * design's CompactTrackRow): 48dp artwork at a 7dp corner
+ * with the hairline edge, the title at the row-title step,
+ * the artist under it in the dim colour, and the track's
+ * own menu at the right. A chart row carries its rank in
+ * the accent red ahead of the artwork — the one red mark
+ * the design spends on a list (its rank badge).
+ */
+@Composable
+private fun HomeCompactRow(
     track: Track,
+    rank: Int?,
     actions: TrackActions,
     isFavorite: Boolean,
     isCurrent: Boolean,
+    isPlaying: Boolean,
     onClick: () -> Unit,
 ) {
-    var menuOpen by remember(track.id) { mutableStateOf(false) }
-    val url = rememberEnrichedArtwork(track)
-    Column(Modifier.width(148.dp)) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (rank != null && rank > 0) {
+            Text(
+                rank.toString(),
+                style = ForteType.caption,
+                color = ForteColors.Red,
+                modifier = Modifier.width(22.dp),
+            )
+        }
         Box(
             modifier = Modifier
-                .size(148.dp)
-                .clip(RoundedCornerShape(16.dp))
+                .size(48.dp)
+                .clip(RoundedCornerShape(7.dp))
                 .background(Brush.linearGradient(artworkGradient(track.title)))
-                .combinedClickable(
-                    onClick = onClick,
-                    onLongClick = { menuOpen = true },
-                ),
+                .border(1.dp, ForteGlass.Hairline, RoundedCornerShape(7.dp)),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 Icons.Filled.MusicNote, contentDescription = null,
                 tint = Color.White.copy(alpha = 0.92f),
-                modifier = Modifier.size(38.dp),
+                modifier = Modifier.size(20.dp),
             )
+            val url = rememberEnrichedArtwork(track)
             if (!url.isNullOrBlank()) {
                 coil.compose.AsyncImage(
                     model = com.kotlinsyd.forte.data.artworkAt(
                         url,
-                        com.kotlinsyd.forte.data.ArtSize.CARD,
+                        com.kotlinsyd.forte.data.ArtSize.ROW,
                     ),
                     placeholder = rememberArtworkPainter(track.title),
                     error = rememberArtworkPainter(track.title),
@@ -1271,55 +1247,34 @@ private fun ListenAgainCard(
                 )
             }
         }
-        Spacer(Modifier.height(7.dp))
-        // Fitted titles, same rule as the shelf cards
-        // (v1.0.24-test): unified to the cardTitle step (15sp —
-        // this card used to run its own 14/12sp pair), two
-        // lines with the 38dp block reserved, the artist line
-        // always reserved under it.
-        Text(
-            track.title,
-            style = ForteType.cardTitle,
-            color = if (isCurrent) ForteColors.Red else Color.White,
-            maxLines = 2, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.height(38.dp),
-        )
-        Text(
-            track.artist.ifBlank { "Song" },
-            style = ForteType.cardSub, color = ForteColors.TextDim,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.height(17.dp),
-        )
-        TrackMenu(
-            track = track, actions = actions, isFavorite = isFavorite,
-            hoistedOpen = menuOpen,
-            onHoistedOpenChange = { menuOpen = it },
-        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = track.title,
+                style = ForteType.rowTitle,
+                color = ForteColors.Text,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = track.artist.ifBlank { "Song" },
+                style = ForteType.cardSub,
+                color = ForteColors.TextDim,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (isCurrent) {
+            Text(
+                text = if (isPlaying) "Playing" else "Paused",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = ForteColors.Red,
+                modifier = Modifier.padding(end = 2.dp),
+            )
+        }
+        TrackMenu(track = track, actions = actions, isFavorite = isFavorite)
     }
 }
 
-/**
- * The Home hero (owner-approved design, v1.0.28-test —
- * the sample forte-hero-bleed-sample-v2.png, his verdict
- * "Perfect"): the poster WHOLE at its original aspect,
- * full width, uncropped, no stretch — and NOTHING drawn
- * over it: no veil, no fade. The header zone above it is
- * pure black and its fade completes above the poster's
- * top edge (see the header in HomeScreen), so the poster
- * starts clean and stays clean. ~8dp under the poster, on
- * the plain page background: the eyebrow, the big title,
- * the meta line, and the Play row — a solid white Play
- * pill, the pure-frost favourite heart, and the carousel
- * dots riding the row's right end. Tight — no blank band
- * anywhere — and Listen again flows straight in below.
- *
- * The CONTENT is tracks (v1.0.24-test): the region's Top
- * Charts in chart order (see the heroTracks rule in
- * HomeScreen). Tapping the poster PLAYS — the same rule
- * as every card on Home — it never opens a page. The
- * favourite heart is the track's own like, the add Forte
- * has for a song. A slow carousel (6 s) that also swipes.
- */
 /**
  * The hero's displayed title (owner's rule, v1.0.25-test):
  * ONLY the main name. The original title is cut at the first
@@ -1341,8 +1296,339 @@ private fun heroTitle(title: String): String {
     return if (main.length >= 2) main else title
 }
 
+/**
+ * Which tracks the Home hero carries, derived from the three
+ * wells in priority order: the region charts, the feed's own
+ * taste shelf (Mixed for you), then his most-played history.
+ * Extracted from the Home composition (v1.0.34-test) so the
+ * pull-path UI tests derive the hero exactly as the screen
+ * does — the same function, not a copy.
+ */
+internal fun heroTracksFor(
+    charts: List<Track>?,
+    homeShelves: List<com.kotlinsyd.forte.data.YtAccount.HomeShelf>?,
+    history: List<Track>,
+    chartsFailed: Boolean,
+    heroDay: Int,
+    heroShift: Int,
+): List<Track> = when {
+    !charts.isNullOrEmpty() -> heroWindow(charts.orEmpty().take(20), heroDay, heroShift)
+    chartsFailed || charts != null -> {
+        val mixed = homeShelves
+            ?.firstOrNull { it.title.contains("Mixed", ignoreCase = true) }
+            ?.tracks.orEmpty()
+        when {
+            // The day/pull stride applies to EVERY well
+            // (v1.0.34-test): before, the fallback wells ignored
+            // heroShift entirely, so on a phone whose hero came
+            // from here a pull could never move the hero at all.
+            mixed.isNotEmpty() -> heroWindow(mixed.take(20), heroDay, heroShift)
+            history.size >= 3 -> heroWindow(history.take(20), heroDay, heroShift)
+            else -> emptyList()
+        }
+    }
+    else -> emptyList()
+}
+
+/**
+ * The hero's window over the chart pool (pure, unit-tested):
+ * 8 consecutive chart hits in cyclic chart order, starting a
+ * full hero page (8 positions) further into the pool for each
+ * day ([heroDay]) and for each pull ([heroShift] grows by 8
+ * per pull). The v1.0.22 window started at `day % (size - 7)`
+ * — one new position per day, seven of eight posters carried
+ * over, and no response to a pull at all. A pool of 8 or
+ * fewer is the window whole: nothing to stride.
+ */
+internal fun heroWindow(pool: List<Track>, heroDay: Int, heroShift: Int): List<Track> {
+    if (pool.size <= 8) return pool
+    val start = Math.floorMod(heroDay * 8 + heroShift, pool.size)
+    return List(8) { i -> pool[(start + i) % pool.size] }
+}
+
+/**
+ * Home's pull-to-refresh container: the material3 box directly
+ * wrapping the scrolling list. Extracted (v1.0.34-test) so the
+ * pull-path UI tests exercise the very container the screen
+ * uses. The indicator's top offset is a parameter: under the
+ * old floating header it had to sit at 84dp, below the header
+ * zone, or the header's solid black bar painted over it and
+ * no pull ever showed (v1.0.34-test); the Listen Now page
+ * (v1.0.35-test) has no floating header, so the screen passes
+ * a small offset and the indicator rides at the very top.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeHero(
+internal fun HomeRefreshBox(
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
+    indicatorTop: androidx.compose.ui.unit.Dp = 84.dp,
+    content: @Composable () -> Unit,
+) {
+    val state = androidx.compose.material3.pulltorefresh
+        .rememberPullToRefreshState()
+    PullToRefreshBox(
+        isRefreshing = isRefreshing,
+        onRefresh = onRefresh,
+        modifier = modifier,
+        state = state,
+        indicator = {
+            androidx.compose.material3.pulltorefresh
+                .PullToRefreshDefaults.Indicator(
+                    state = state,
+                    isRefreshing = isRefreshing,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = indicatorTop),
+                )
+        },
+    ) {
+        content()
+    }
+}
+
+/**
+ * The pull-to-refresh state of Home, in one holder
+ * (v1.0.34-test): the gesture handler, both feed effects and
+ * the refresh box all read and write this single object, so
+ * the chain the UI tests exercise is the chain the screen
+ * runs — the handler itself, not a re-implementation.
+ *
+ * [onPull] is everything a pull does to state: the spinner
+ * goes up ([isRefreshing]), the hero window strides a full
+ * page ([heroShift]) and the feed effects re-run ([forceTick]
+ * is their key). The feed effect calls [settle] when its fetch
+ * lands, which is what brings the spinner down.
+ */
+internal class HomePullState {
+    var heroShift by mutableStateOf(0)
+        private set
+    var forceTick by mutableStateOf(0)
+        private set
+    var isRefreshing by mutableStateOf(false)
+        private set
+
+    fun onPull() {
+        isRefreshing = true
+        heroShift += 8
+        forceTick++
+    }
+
+    fun settle() {
+        isRefreshing = false
+    }
+}
+
+/**
+ * The resume trigger's replay guard: registering a lifecycle
+ * observer replays the current state once, and that first
+ * ON_RESUME is composition itself, not a return from
+ * background. [onResume] returns true only for real returns.
+ * Extracted (v1.0.34-test) so the auto-refresh trigger is
+ * unit-testable.
+ */
+internal class ResumeGate {
+    private var replayed = false
+
+    fun onResume(): Boolean {
+        if (!replayed) {
+            replayed = true
+            return false
+        }
+        return true
+    }
+}
+
+/**
+ * The Listen Now featured card (v1.0.35-test; RETIRED from
+ * Home in v1.0.37-test — the layout it fronted was rejected
+ * whole, and the lead shelf is a compact-row pager now).
+ * It stays in the tree because the pull-path UI tests
+ * compose it as the hero's face: a pull must visibly turn
+ * it over (see HomePullRefreshTest). Nothing in the app
+ * navigates to it.
+ */
+@Composable
+internal fun FeaturedChartCard(
+    track: Track,
+    label: String,
+    headline: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .forteGlassPanel(RoundedCornerShape(ForteGlass.RadiusPanel))
+            .clickable { onClick() },
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .background(Brush.linearGradient(artworkGradient(track.title))),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.MusicNote, contentDescription = null,
+                tint = Color.White.copy(alpha = 0.92f),
+                modifier = Modifier.size(44.dp),
+            )
+            if (!track.thumbUrl.isNullOrBlank()) {
+                coil.compose.AsyncImage(
+                    model = com.kotlinsyd.forte.data.artworkAt(
+                        track.thumbUrl,
+                        com.kotlinsyd.forte.data.ArtSize.HERO,
+                    ),
+                    placeholder = rememberArtworkPainter(track.title),
+                    error = rememberArtworkPainter(track.title),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+        Column(
+            Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 16.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        label,
+                        style = ForteType.groupLabel,
+                        color = ForteColors.Red,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        headline,
+                        fontSize = 21.sp, fontWeight = FontWeight.ExtraBold,
+                        color = Color.White,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .clickable { onClick() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow, contentDescription = "Play",
+                        tint = ForteColors.Bg, modifier = Modifier.size(24.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                heroTitle(track.title),
+                style = ForteType.rowTitle,
+                color = Color.White,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                track.artist.ifBlank { "Song" },
+                style = ForteType.rowSub,
+                color = ForteColors.TextDim,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/**
+ * One shelf card for a song (the feed shelves' shared
+ * card, v1.0.37-test at the reference design's metrics):
+ * 150dp artwork at the 12dp corner, a 10dp gap, the title
+ * at the card-title step on one line, the artist under it
+ * in the dim colour on one line — no reserved blocks, the
+ * card is exactly as tall as its text.
+ */
+@Composable
+private fun ShelfTrackCard(
+    track: Track,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .width(150.dp)
+            .clickable { onClick() },
+    ) {
+        Artwork(track.thumbUrl, track.title, 150.dp, corner = ForteGlass.RadiusArtwork)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            track.title, style = ForteType.cardTitle,
+            color = Color.White, maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            track.artist, style = ForteType.cardSub,
+            color = ForteColors.TextDim,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * One Home shelf as a card row: the shelf's songs as cards
+ * (a tap plays the song in its shelf queue), then its cards
+ * (a tap plays the page behind the scenes — see playCard in
+ * HomeScreen). FORTE-9: a plain scrollable Row, not a
+ * LazyRow — a lazy list nested inside the Home lazy column
+ * makes a TV remote's focus search re-measure both lists and
+ * every card between on the main thread for one key press,
+ * which froze a low-end TV box into an ANR. Shelves are
+ * short, so an eager Row measures once, cheaply, and looks
+ * and scrolls the same.
+ */
+@Composable
+private fun ShelfCardRow(
+    shelf: com.kotlinsyd.forte.data.YtAccount.HomeShelf,
+    actions: TrackActions,
+    onPlayCard: (com.kotlinsyd.forte.data.YtAccount.HomeCard) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        shelf.tracks.forEach { track ->
+            ShelfTrackCard(
+                track = track,
+                onClick = { actions.play(track, shelf.tracks, shelf.title) },
+            )
+        }
+        shelf.cards.forEach { card ->
+            Column(
+                modifier = Modifier
+                    .width(150.dp)
+                    .clickable { onPlayCard(card) },
+            ) {
+                Artwork(card.thumbUrl, card.title, 150.dp, corner = ForteGlass.RadiusArtwork)
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    card.title, style = ForteType.cardTitle,
+                    color = Color.White, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    card.subtitle ?: "", style = ForteType.cardSub,
+                    color = ForteColors.TextDim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun HomeHero(
     tracks: List<Track>,
     eyebrow: String,
     isFavorite: (Track) -> Boolean,

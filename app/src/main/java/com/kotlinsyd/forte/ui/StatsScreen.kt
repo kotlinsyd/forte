@@ -98,8 +98,7 @@ private fun formatListeningTime(totalSec: Long): String {
 private fun StatCard(label: String, value: String, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(18.dp))
-            .background(ForteColors.Surface)
+            .forteGlassPanel(RoundedCornerShape(ForteGlass.RadiusCard))
             .padding(16.dp),
     ) {
         Text(value, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)

@@ -1,6 +1,7 @@
 package com.kotlinsyd.forte.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -190,7 +191,11 @@ fun SearchScreen(
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
                 .height(54.dp)
-                .clip(RoundedCornerShape(16.dp)),
+                .clip(RoundedCornerShape(ForteGlass.RadiusArtwork))
+                .border(
+                    1.dp, ForteGlass.Hairline,
+                    RoundedCornerShape(ForteGlass.RadiusArtwork),
+                ),
             placeholder = { Text("Songs, artists, albums…", color = ForteColors.TextDim) },
             leadingIcon = {
                 Icon(
@@ -213,8 +218,8 @@ fun SearchScreen(
                 recents = app.settings.recents()
             }),
             colors = TextFieldDefaults.colors(
-                focusedContainerColor = ForteColors.Surface,
-                unfocusedContainerColor = ForteColors.Surface,
+                focusedContainerColor = ForteGlass.FieldFill,
+                unfocusedContainerColor = ForteGlass.FieldFill,
                 focusedIndicatorColor = Color.Transparent,
                 unfocusedIndicatorColor = Color.Transparent,
             ),
@@ -256,7 +261,7 @@ fun SearchScreen(
                                 modifier = Modifier
                                     .size(36.dp)
                                     .clip(CircleShape)
-                                    .background(ForteColors.SurfaceHi),
+                                    .background(ForteGlass.ChipFill),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Icon(
@@ -329,8 +334,17 @@ fun SearchScreen(
                     val selected = vm.filter == f
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .background(if (selected) ForteColors.Red else ForteColors.Surface)
+                            .then(
+                                if (selected) {
+                                    Modifier
+                                        .clip(RoundedCornerShape(ForteGlass.RadiusCapsule))
+                                        .background(Color.White)
+                                } else {
+                                    Modifier.forteGlassChip(
+                                        RoundedCornerShape(ForteGlass.RadiusCapsule),
+                                    )
+                                },
+                            )
                             .clickable { vm.chooseFilter(f) }
                             .padding(horizontal = 16.dp, vertical = 8.dp),
                     ) {
@@ -338,7 +352,7 @@ fun SearchScreen(
                             f.name.lowercase().replaceFirstChar { it.uppercase() },
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = Color.White,
+                            color = if (selected) Color.Black else Color.White,
                         )
                     }
                 }
@@ -378,8 +392,9 @@ fun SearchScreen(
                                     ) {
                                         Box(
                                             Modifier
-                                                .clip(RoundedCornerShape(50))
-                                                .background(ForteColors.SurfaceHi)
+                                                .forteGlassChip(
+                                                    RoundedCornerShape(ForteGlass.RadiusCapsule),
+                                                )
                                                 .clickable { vm.loadMore() }
                                                 .padding(horizontal = 22.dp, vertical = 10.dp),
                                         ) {
